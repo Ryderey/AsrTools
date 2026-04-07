@@ -5,6 +5,9 @@ import platform
 import subprocess
 import sys
 import webbrowser
+import signal
+import tempfile
+import threading
 
 # FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH 
 plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
@@ -31,40 +34,137 @@ logging.basicConfig(
 class WorkerSignals(QObject):
     finished = Signal(str, str)
     errno = Signal(str, str)
+    cancelled = Signal(str)  # 新增：任务被取消信号
 
 
 class ASRWorker(QRunnable):
-    """ASR处理工作线程"""
+    """ASR处理工作线程（支持强制终止）"""
+    _workers = {}  # 类变量：跟踪所有活动的worker
+    _lock = threading.Lock()
+    
     def __init__(self, file_path, asr_engine, export_format):
         super().__init__()
         self.file_path = file_path
         self.asr_engine = asr_engine
         self.export_format = export_format
         self.signals = WorkerSignals()
-
+        
         self.audio_path = None
-
+        self._is_cancelled = False
+        self._cancel_lock = threading.Lock()
+        self._ffmpeg_process = None
+        self._temp_files = []  # 跟踪临时文件
+        
+        # 注册到活动worker字典
+        with ASRWorker._lock:
+            ASRWorker._workers[file_path] = self
+    
+    def is_cancelled(self):
+        """检查是否被取消"""
+        with self._cancel_lock:
+            return self._is_cancelled
+    
+    def cancel(self):
+        """取消任务"""
+        with self._cancel_lock:
+            self._is_cancelled = True
+        
+        # 终止ffmpeg进程
+        self._terminate_ffmpeg()
+        
+        logging.info(f"任务已取消: {self.file_path}")
+    
+    def _terminate_ffmpeg(self):
+        """终止ffmpeg进程"""
+        if self._ffmpeg_process and self._ffmpeg_process.poll() is None:
+            try:
+                # Windows使用TASKKILL强制终止进程树
+                if platform.system() == "Windows":
+                    subprocess.run(
+                        ['taskkill', '/F', '/T', '/PID', str(self._ffmpeg_process.pid)],
+                        capture_output=True,
+                        check=False
+                    )
+                else:
+                    # Unix系统使用进程组终止
+                    os.killpg(os.getpgid(self._ffmpeg_process.pid), signal.SIGTERM)
+                    # 给进程一点时间优雅退出，然后强制终止
+                    try:
+                        self._ffmpeg_process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(os.getpgid(self._ffmpeg_process.pid), signal.SIGKILL)
+                logging.info(f"已终止ffmpeg进程: {self.file_path}")
+            except Exception as e:
+                logging.warning(f"终止ffmpeg进程时出错: {e}")
+    
+    def _cleanup_temp_files(self):
+        """清理临时文件"""
+        for temp_file in self._temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    logging.info(f"已删除临时文件: {temp_file}")
+            except Exception as e:
+                logging.warning(f"删除临时文件失败 {temp_file}: {e}")
+        self._temp_files.clear()
+    
+    @staticmethod
+    def get_worker(file_path):
+        """获取指定文件的worker"""
+        with ASRWorker._lock:
+            return ASRWorker._workers.get(file_path)
+    
+    @staticmethod
+    def remove_worker(file_path):
+        """从活动worker字典中移除"""
+        with ASRWorker._lock:
+            ASRWorker._workers.pop(file_path, None)
+    
     @Slot()
     def run(self):
         try:
+            # 检查是否已被取消
+            if self.is_cancelled():
+                self.signals.cancelled.emit(self.file_path)
+                return
+            
             use_cache = True
             
             # 检查文件类型,如果不是音频则转换
-            logging.info("[+]正在进ffmpeg转换")
+            logging.info("[+]正在进行ffmpeg转换")
             audio_exts = ['.mp3', '.wav']
             if not any(self.file_path.lower().endswith(ext) for ext in audio_exts):
                 temp_audio = self.file_path.rsplit(".", 1)[0] + ".mp3"
-                if not video2audio(self.file_path, temp_audio):
-                    raise Exception("音频转换失败，确保安装ffmpeg")
+                self._temp_files.append(temp_audio)  # 跟踪临时文件
+                
+                if not video2audio(self.file_path, temp_audio, self):
+                    if self.is_cancelled():
+                        self._cleanup_temp_files()
+                        self.signals.cancelled.emit(self.file_path)
+                    else:
+                        raise Exception("音频转换失败，确保安装ffmpeg")
+                    return
                 self.audio_path = temp_audio
             else:
                 self.audio_path = self.file_path
+            
+            # 再次检查是否被取消
+            if self.is_cancelled():
+                self._cleanup_temp_files()
+                self.signals.cancelled.emit(self.file_path)
+                return
             
             # 使用B接口进行ASR识别
             asr = BcutASR(self.audio_path, use_cache=use_cache)
 
             logging.info(f"开始处理文件: {self.file_path} 使用引擎: {self.asr_engine}")
             result = asr.run()
+            
+            # 检查是否被取消
+            if self.is_cancelled():
+                self._cleanup_temp_files()
+                self.signals.cancelled.emit(self.file_path)
+                return
             
             # 根据导出格式选择转换方法
             save_ext = self.export_format.lower()
@@ -79,10 +179,25 @@ class ASRWorker(QRunnable):
             save_path = self.file_path.rsplit(".", 1)[0] + "." + save_ext
             with open(save_path, "w", encoding="utf-8") as f:
                 f.write(result_text)
+            
+            # 清理临时文件（保留成功生成的字幕文件）
+            self._cleanup_temp_files()
+            
+            # 从活动worker中移除
+            ASRWorker.remove_worker(self.file_path)
+            
             self.signals.finished.emit(self.file_path, result_text)
+            
         except Exception as e:
-            logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
-            self.signals.errno.emit(self.file_path, f"处理时出错: {str(e)}")
+            # 从活动worker中移除
+            ASRWorker.remove_worker(self.file_path)
+            
+            if self.is_cancelled():
+                self._cleanup_temp_files()
+                self.signals.cancelled.emit(self.file_path)
+            else:
+                logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
+                self.signals.errno.emit(self.file_path, f"处理时出错: {str(e)}")
 
 class UpdateCheckerThread(QThread):
     msg = pyqtSignal(str, str, str)  # 用于发送消息的信号
@@ -118,7 +233,61 @@ class ASRWidget(QWidget):
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(self.max_threads)
         self.processing_queue = []
-        self.workers = {}  # 维护文件路径到worker的映射
+        self.workers = {}  # 维护文件路径到worker的映射（用于信号连接跟踪）
+    
+    def _terminate_and_cleanup_task(self, file_path, status_item=None):
+        """终止任务并清理资源
+        
+        Args:
+            file_path: 文件路径
+            status_item: 状态项，用于判断是否需要删除临时文件
+        
+        Returns:
+            bool: 是否成功终止
+        """
+        if not file_path:
+            return False
+        
+        terminated = False
+        
+        # 1. 从队列中移除（如果存在）
+        if file_path in self.processing_queue:
+            try:
+                self.processing_queue.remove(file_path)
+                logging.info(f"已从队列移除: {file_path}")
+            except ValueError:
+                pass
+        
+        # 2. 强制终止正在运行的worker
+        worker = ASRWorker.get_worker(file_path)
+        if worker:
+            worker.cancel()
+            terminated = True
+            logging.info(f"已取消任务: {file_path}")
+        
+        # 3. 断开信号连接
+        if file_path in self.workers:
+            try:
+                old_worker = self.workers[file_path]
+                old_worker.signals.finished.disconnect(self.update_table)
+                old_worker.signals.errno.disconnect(self.handle_error)
+                old_worker.signals.cancelled.disconnect(self.handle_cancelled)
+            except Exception:
+                pass
+            self.workers.pop(file_path, None)
+        
+        # 4. 删除临时文件（如果任务正在处理中，可能已经产生了临时文件）
+        if status_item and status_item.text() == "处理中":
+            # 尝试删除可能的临时mp3文件
+            try:
+                temp_audio = file_path.rsplit(".", 1)[0] + ".mp3"
+                if os.path.exists(temp_audio) and temp_audio != file_path:
+                    os.remove(temp_audio)
+                    logging.info(f"已删除临时音频文件: {temp_audio}")
+            except Exception as e:
+                logging.warning(f"删除临时文件失败: {e}")
+        
+        return terminated
 
 
     def init_ui(self):
@@ -189,6 +358,20 @@ class ASRWidget(QWidget):
         self.batch_process_button.clicked.connect(self.process_selected_files)
         self.batch_process_button.setEnabled(False)
         batch_layout.addWidget(self.batch_process_button)
+        
+        # 批量重新处理按钮
+        self.batch_reprocess_button = PushButton("批量重新处理", self)
+        self.batch_reprocess_button.setIcon(FIF.SYNC)
+        self.batch_reprocess_button.clicked.connect(self.batch_reprocess_selected)
+        self.batch_reprocess_button.setEnabled(False)
+        batch_layout.addWidget(self.batch_reprocess_button)
+        
+        # 批量删除按钮
+        self.batch_delete_button = PushButton("批量删除", self)
+        self.batch_delete_button.setIcon(FIF.DELETE)
+        self.batch_delete_button.clicked.connect(self.batch_delete_selected)
+        self.batch_delete_button.setEnabled(False)
+        batch_layout.addWidget(self.batch_delete_button)
         
         batch_layout.addStretch()
         layout.addLayout(batch_layout)
@@ -269,26 +452,55 @@ class ASRWidget(QWidget):
         menu.exec(QCursor.pos())
 
     def delete_selected_row(self):
-        """删除选中的行"""
+        """删除选中的行（右键菜单用，强制终止并清理资源）"""
         current_row = self.table.currentRow()
-        if current_row >= 0:
-            file_path = self.table.item(current_row, 1).data(Qt.UserRole)
-            if file_path in self.workers:
-                worker = self.workers[file_path]
-                worker.signals.finished.disconnect(self.update_table)
-                worker.signals.errno.disconnect(self.handle_error)
-                # QThreadPool 不支持直接终止线程，通常需要设计任务可中断
-                # 这里仅移除引用
-                self.workers.pop(file_path, None)
-            self.table.removeRow(current_row)
-            self.update_start_button_state()
+        if current_row < 0 or current_row >= self.table.rowCount():
+            return
+            
+        filename_item = self.table.item(current_row, 1)
+        status_item = self.table.item(current_row, 2)
+        if filename_item is None:
+            return
+            
+        file_path = filename_item.data(Qt.UserRole)
+        if not file_path:
+            return
+        
+        # 如果任务正在处理中，显示确认对话框
+        if status_item and status_item.text() == "处理中":
+            w = MessageBox('确认删除', 
+                          '该任务正在处理中，强制终止并删除吗？\n（将清理所有相关资源）',
+                          self)
+            w.yesButton.setText('确定')
+            w.cancelButton.setText('取消')
+            if not w.exec():
+                return
+        
+        # 强制终止任务并清理资源
+        self._terminate_and_cleanup_task(file_path, status_item)
+        
+        # 删除行
+        self.table.removeRow(current_row)
+        self.update_start_button_state()
+        
+        InfoBar.success(
+            title='删除成功',
+            content="任务已删除",
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=1500,
+            parent=self
+        )
 
     def open_file_directory(self):
         """打开文件所在目录"""
         current_row = self.table.currentRow()
-        if current_row >= 0:
-            current_item = self.table.item(current_row, 1)
-            if current_item:
+        if current_row < 0 or current_row >= self.table.rowCount():
+            return
+            
+        current_item = self.table.item(current_row, 1)
+        if current_item:
                 file_path = current_item.data(Qt.UserRole)
                 directory = os.path.dirname(file_path)
                 try:
@@ -310,23 +522,63 @@ class ASRWidget(QWidget):
                     )
 
     def reprocess_selected_file(self):
-        """重新处理选中的文件"""
+        """重新处理选中的文件（右键菜单用，支持强制终止）"""
         current_row = self.table.currentRow()
-        if current_row >= 0:
-            file_path = self.table.item(current_row, 1).data(Qt.UserRole)
-            status = self.table.item(current_row, 2).text()
-            if status == "处理中":
-                InfoBar.warning(
-                    title='当前文件正在处理中',
-                    content="请等待当前文件处理完成后再重新处理。",
-                    orient=Qt.Horizontal,
-                    isClosable=True,
-                    position=InfoBarPosition.TOP,
-                    duration=3000,
-                    parent=self
-                )
+        if current_row < 0 or current_row >= self.table.rowCount():
+            return
+            
+        filename_item = self.table.item(current_row, 1)
+        status_item = self.table.item(current_row, 2)
+        
+        if filename_item is None or status_item is None:
+            return
+            
+        file_path = filename_item.data(Qt.UserRole)
+        if not file_path:
+            return
+            
+        status = status_item.text()
+        if status == "处理中":
+            # 如果正在处理中，询问是否强制终止
+            w = MessageBox('确认重新处理', 
+                          '该任务正在处理中，强制终止并重新处理吗？\n（将清理所有相关资源）',
+                          self)
+            w.yesButton.setText('确定')
+            w.cancelButton.setText('取消')
+            if not w.exec():
                 return
-            self.add_to_queue(file_path)
+            
+            # 强制终止任务并清理资源
+            self._terminate_and_cleanup_task(file_path, status_item)
+        else:
+            # 对于已完成的任务，断开旧连接
+            if file_path in self.workers:
+                try:
+                    worker = self.workers[file_path]
+                    worker.signals.finished.disconnect(self.update_table)
+                    worker.signals.errno.disconnect(self.handle_error)
+                    worker.signals.cancelled.disconnect(self.handle_cancelled)
+                except Exception:
+                    pass
+                self.workers.pop(file_path, None)
+        
+        # 更新状态为"未处理"
+        new_status = self.create_non_editable_item("未处理")
+        new_status.setForeground(QColor("gray"))
+        self.table.setItem(current_row, 2, new_status)
+        
+        # 添加到队列
+        self.add_to_queue(file_path)
+        
+        InfoBar.success(
+            title='已添加到队列',
+            content="任务已重新添加到处理队列",
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=1500,
+            parent=self
+        )
 
     def add_to_queue(self, file_path):
         """将文件添加到处理队列并更新状态"""
@@ -336,9 +588,14 @@ class ASRWidget(QWidget):
     def process_files(self):
         """处理所有未处理的文件"""
         for row in range(self.table.rowCount()):
-            if self.table.item(row, 2).text() == "未处理":
-                file_path = self.table.item(row, 1).data(Qt.UserRole)
-                self.processing_queue.append(file_path)
+            status_item = self.table.item(row, 2)
+            filename_item = self.table.item(row, 1)
+            if status_item is None or filename_item is None:
+                continue
+            if status_item.text() == "未处理":
+                file_path = filename_item.data(Qt.UserRole)
+                if file_path:
+                    self.processing_queue.append(file_path)
         self.process_next_in_queue()
 
     def process_next_in_queue(self):
@@ -350,47 +607,71 @@ class ASRWidget(QWidget):
 
     def process_file(self, file_path):
         """处理单个文件"""
+        if not file_path:
+            return
+            
         selected_engine = self.combo_box.currentText()
         selected_format = self.format_combo.currentText()
         worker = ASRWorker(file_path, selected_engine, selected_format)
         worker.signals.finished.connect(self.update_table)
         worker.signals.errno.connect(self.handle_error)
+        worker.signals.cancelled.connect(self.handle_cancelled)
         self.thread_pool.start(worker)
         self.workers[file_path] = worker
 
         row = self.find_row_by_file_path(file_path)
-        if row != -1:
+        if row != -1 and 0 <= row < self.table.rowCount():
             status_item = self.create_non_editable_item("处理中")
             status_item.setForeground(QColor("orange"))
             self.table.setItem(row, 2, status_item)
             self.update_start_button_state()
+    
+    def handle_cancelled(self, file_path):
+        """处理任务被取消的情况"""
+        row = self.find_row_by_file_path(file_path)
+        if row != -1 and 0 <= row < self.table.rowCount():
+            # 更新状态为"已取消"
+            item_status = self.create_non_editable_item("已取消")
+            item_status.setForeground(QColor("gray"))
+            self.table.setItem(row, 2, item_status)
+        
+        # 清理引用
+        if file_path in self.workers:
+            self.workers.pop(file_path, None)
+        
+        # 继续处理队列
+        self.process_next_in_queue()
+        self.update_start_button_state()
 
     def update_table(self, file_path, result):
         """更新表格中文件的处理状态"""
         row = self.find_row_by_file_path(file_path)
-        if row != -1:
+        if row != -1 and 0 <= row < self.table.rowCount():
             item_status = self.create_non_editable_item("已处理")
             item_status.setForeground(QColor("green"))
             self.table.setItem(row, 2, item_status)
+            
+            filename_item = self.table.item(row, 1)
+            if filename_item:
+                InfoBar.success(
+                    title='处理完成',
+                    content=f"文件 {filename_item.text()} 已处理完成",
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.TOP,
+                    duration=1500,
+                    parent=self
+                )
 
-            InfoBar.success(
-                title='处理完成',
-                content=f"文件 {self.table.item(row, 1).text()} 已处理完成",
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP,
-                duration=1500,
-                parent=self
-            )
-
-        self.workers.pop(file_path, None)
+        if file_path:
+            self.workers.pop(file_path, None)
         self.process_next_in_queue()
         self.update_start_button_state()
 
     def handle_error(self, file_path, error_message):
         """处理错误信息"""
         row = self.find_row_by_file_path(file_path)
-        if row != -1:
+        if row != -1 and 0 <= row < self.table.rowCount():
             item_status = self.create_non_editable_item("错误")
             item_status.setForeground(QColor("red"))
             self.table.setItem(row, 2, item_status)
@@ -405,55 +686,100 @@ class ASRWidget(QWidget):
                 parent=self
             )
 
-        self.workers.pop(file_path, None)
+        if file_path:
+            self.workers.pop(file_path, None)
         self.process_next_in_queue()
         self.update_start_button_state()
 
     def find_row_by_file_path(self, file_path):
-        """根据文件路径查找表格中的行号"""
+        """根据文件路径查找表格中的行号（带健壮性检查）"""
+        if not file_path:
+            return -1
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 1)
-            if item.data(Qt.UserRole) == file_path:
+            if item is not None and item.data(Qt.UserRole) == file_path:
                 return row
         return -1
 
     def update_start_button_state(self):
         """根据文件列表更新按钮的状态"""
         has_files = self.table.rowCount() > 0
-        has_unprocessed = any(
-            self.table.item(row, 2) is not None and self.table.item(row, 2).text() == "未处理"
-            for row in range(self.table.rowCount())
-        )
-        has_selected = any(
-            self.table.item(row, 0) is not None and self.table.item(row, 0).checkState() == Qt.Checked
-            for row in range(self.table.rowCount())
-        )
+        
+        # 检查是否有未处理的任务
+        has_unprocessed = False
+        for row in range(self.table.rowCount()):
+            status_item = self.table.item(row, 2)
+            if status_item is not None and status_item.text() == "未处理":
+                has_unprocessed = True
+                break
+        
+        # 获取选中的行
+        selected_rows = self.get_selected_rows()
+        has_selected = len(selected_rows) > 0
+        
+        # 检查选中的任务中是否有可重新处理的（已处理或错误的）
+        has_reprocessable = False
+        for row in selected_rows:
+            if not (0 <= row < self.table.rowCount()):
+                continue
+            status_item = self.table.item(row, 2)
+            if status_item is not None and status_item.text() in ["已处理", "错误"]:
+                has_reprocessable = True
+                break
+        
+        # 更新按钮状态
         self.process_button.setEnabled(has_unprocessed)
         self.select_all_button.setEnabled(has_files)
         self.batch_process_button.setEnabled(has_selected)
+        self.batch_reprocess_button.setEnabled(has_reprocessable)
+        self.batch_delete_button.setEnabled(has_selected)
 
     def on_table_item_changed(self, item):
         """处理表格项变化（复选框状态变化）"""
+        if item is None:
+            return
+            
         # 只处理第0列（复选框列）的变化
         if item.column() == 0:
             self.update_start_button_state()
             # 更新全选按钮文本
             if self.table.rowCount() > 0:
-                all_checked = all(
-                    self.table.item(row, 0).checkState() == Qt.Checked
-                    for row in range(self.table.rowCount())
-                )
+                all_checked = True
+                for row in range(self.table.rowCount()):
+                    checkbox_item = self.table.item(row, 0)
+                    if checkbox_item is None or checkbox_item.checkState() != Qt.Checked:
+                        all_checked = False
+                        break
                 self.select_all_button.setText("取消全选" if all_checked else "全选")
 
     def toggle_select_all(self):
         """全选/取消全选"""
-        all_checked = all(
-            self.table.item(row, 0).checkState() == Qt.Checked
-            for row in range(self.table.rowCount())
-        )
-        new_state = Qt.Unchecked if all_checked else Qt.Checked
+        # 健壮性检查：空表格直接返回
+        if self.table.rowCount() == 0:
+            return
+            
+        # 检查当前是否全选
+        all_checked = True
         for row in range(self.table.rowCount()):
-            self.table.item(row, 0).setCheckState(new_state)
+            checkbox_item = self.table.item(row, 0)
+            if checkbox_item is None or checkbox_item.checkState() != Qt.Checked:
+                all_checked = False
+                break
+        
+        # 切换状态
+        new_state = Qt.Unchecked if all_checked else Qt.Checked
+        
+        # 暂时断开信号，避免频繁触发更新
+        self.table.itemChanged.disconnect(self.on_table_item_changed)
+        try:
+            for row in range(self.table.rowCount()):
+                checkbox_item = self.table.item(row, 0)
+                if checkbox_item is not None and checkbox_item.flags() & Qt.ItemIsUserCheckable:
+                    checkbox_item.setCheckState(new_state)
+        finally:
+            # 恢复信号连接
+            self.table.itemChanged.connect(self.on_table_item_changed)
+        
         self.select_all_button.setText("取消全选" if not all_checked else "全选")
         self.update_start_button_state()
 
@@ -461,13 +787,23 @@ class ASRWidget(QWidget):
         """批量处理选中的文件"""
         selected_files = []
         for row in range(self.table.rowCount()):
-            if self.table.item(row, 0).checkState() == Qt.Checked:
-                status = self.table.item(row, 2).text()
-                if status == "未处理":
-                    file_path = self.table.item(row, 1).data(Qt.UserRole)
+            checkbox_item = self.table.item(row, 0)
+            if checkbox_item is None or checkbox_item.checkState() != Qt.Checked:
+                continue
+            
+            status_item = self.table.item(row, 2)
+            filename_item = self.table.item(row, 1)
+            if status_item is None or filename_item is None:
+                continue
+                
+            status = status_item.text()
+            if status == "未处理":
+                file_path = filename_item.data(Qt.UserRole)
+                if file_path:
                     selected_files.append(file_path)
-                elif status == "处理中":
-                    file_path = self.table.item(row, 1).data(Qt.UserRole)
+            elif status == "处理中":
+                file_path = filename_item.data(Qt.UserRole)
+                if file_path:
                     InfoBar.warning(
                         title='文件正在处理中',
                         content=f"文件 {os.path.basename(file_path)} 正在处理中，已跳过。",
@@ -493,6 +829,240 @@ class ASRWidget(QWidget):
         for file_path in selected_files:
             self.processing_queue.append(file_path)
         self.process_next_in_queue()
+
+    def get_selected_rows(self):
+        """获取所有选中的行索引（带健壮性检查）"""
+        selected_rows = []
+        row_count = self.table.rowCount()
+        
+        for row in range(row_count):
+            checkbox_item = self.table.item(row, 0)
+            # 健壮性检查：确保单元格存在且是复选框类型
+            if (checkbox_item is not None and 
+                checkbox_item.flags() & Qt.ItemIsUserCheckable and
+                checkbox_item.checkState() == Qt.Checked):
+                selected_rows.append(row)
+        
+        return selected_rows
+
+    def batch_reprocess_selected(self):
+        """批量重新处理选中的任务（强制终止正在处理的任务并清理资源）"""
+        # 1. 获取所有选中的行
+        selected_rows = self.get_selected_rows()
+        
+        # 2. 健壮性验证
+        if not selected_rows:
+            InfoBar.warning(
+                title='未选择任务',
+                content="请先勾选需要重新处理的任务。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
+            return
+        
+        # 3. 统计各类状态的任务
+        reprocessable_rows = []  # 已处理或错误的任务
+        processing_rows = []     # 正在处理中的任务
+        
+        for row in selected_rows:
+            if not (0 <= row < self.table.rowCount()):
+                continue
+                
+            status_item = self.table.item(row, 2)
+            filename_item = self.table.item(row, 1)
+            
+            if status_item is None or filename_item is None:
+                continue
+                
+            status = status_item.text()
+            if status in ["已处理", "错误", "已取消"]:
+                reprocessable_rows.append(row)
+            elif status == "处理中":
+                processing_rows.append(row)
+        
+        total_count = len(reprocessable_rows) + len(processing_rows)
+        
+        if total_count == 0:
+            InfoBar.warning(
+                title='没有可重新处理的任务',
+                content="请勾选已处理、处理失败或处理中的任务。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
+            return
+        
+        # 4. 确认对话框（当包含正在处理的任务时）
+        if processing_rows:
+            confirm_msg = f'选中任务中有 {len(processing_rows)} 个正在处理中，强制终止并重新处理吗？'
+            w = MessageBox('确认重新处理', confirm_msg, self)
+            w.yesButton.setText('确定')
+            w.cancelButton.setText('取消')
+            if not w.exec():
+                # 用户取消，只处理已完成的任务
+                if not reprocessable_rows:
+                    return
+                processing_rows = []
+        
+        # 5. 处理正在处理中的任务（强制终止并清理）
+        terminated_count = 0
+        for row in processing_rows:
+            filename_item = self.table.item(row, 1)
+            status_item = self.table.item(row, 2)
+            if filename_item is None:
+                continue
+                
+            file_path = filename_item.data(Qt.UserRole)
+            if not file_path:
+                continue
+            
+            # 强制终止任务并清理资源
+            if self._terminate_and_cleanup_task(file_path, status_item):
+                terminated_count += 1
+            
+            # 更新状态为"未处理"
+            if status_item:
+                new_status = self.create_non_editable_item("未处理")
+                new_status.setForeground(QColor("gray"))
+                self.table.setItem(row, 2, new_status)
+            
+            # 添加到队列
+            self.processing_queue.append(file_path)
+        
+        # 6. 处理已完成的任务（断开连接并重新加入队列）
+        for row in reprocessable_rows:
+            filename_item = self.table.item(row, 1)
+            if filename_item is None:
+                continue
+                
+            file_path = filename_item.data(Qt.UserRole)
+            if not file_path:
+                continue
+            
+            # 断开可能存在的旧worker连接
+            if file_path in self.workers:
+                try:
+                    worker = self.workers[file_path]
+                    worker.signals.finished.disconnect(self.update_table)
+                    worker.signals.errno.disconnect(self.handle_error)
+                    worker.signals.cancelled.disconnect(self.handle_cancelled)
+                except Exception:
+                    pass
+                self.workers.pop(file_path, None)
+            
+            # 更新状态为"未处理"
+            status_item = self.table.item(row, 2)
+            if status_item:
+                new_status = self.create_non_editable_item("未处理")
+                new_status.setForeground(QColor("gray"))
+                self.table.setItem(row, 2, new_status)
+            
+            # 添加到队列
+            self.processing_queue.append(file_path)
+        
+        # 7. 启动处理流程
+        processed_count = len(reprocessable_rows) + len(processing_rows)
+        if processed_count > 0:
+            self.process_next_in_queue()
+            self.update_start_button_state()
+            msg = f"已将 {processed_count} 个任务添加到处理队列"
+            if terminated_count > 0:
+                msg += f"（其中 {terminated_count} 个已强制终止）"
+            InfoBar.success(
+                title='已添加到队列',
+                content=msg,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
+
+    def batch_delete_selected(self):
+        """批量删除选中的任务（强制终止并清理资源）"""
+        # 1. 获取所有选中的行
+        selected_rows = self.get_selected_rows()
+        
+        # 2. 健壮性验证
+        if not selected_rows:
+            InfoBar.warning(
+                title='未选择任务',
+                content="请先勾选需要删除的任务。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
+            return
+        
+        # 3. 确认对话框（当选择多个任务时）
+        processing_count = 0
+        for row in selected_rows:
+            if not (0 <= row < self.table.rowCount()):
+                continue
+            status_item = self.table.item(row, 2)
+            if status_item and status_item.text() == "处理中":
+                processing_count += 1
+        
+        confirm_msg = f'确定要删除 {len(selected_rows)} 个选中的任务吗？'
+        if processing_count > 0:
+            confirm_msg += f'\n\n注意：其中有 {processing_count} 个任务正在处理中，强制终止可能会产生临时文件。'
+        
+        if len(selected_rows) > 1 or processing_count > 0:
+            w = MessageBox('确认删除', confirm_msg, self)
+            w.yesButton.setText('确定')
+            w.cancelButton.setText('取消')
+            if not w.exec():
+                return
+        
+        # 4. 逆序删除（避免索引错乱）
+        selected_rows.sort(reverse=True)
+        deleted_count = 0
+        terminated_count = 0
+        
+        for row in selected_rows:
+            if not (0 <= row < self.table.rowCount()):
+                continue
+            
+            filename_item = self.table.item(row, 1)
+            status_item = self.table.item(row, 2)
+            if filename_item is None:
+                continue
+                
+            file_path = filename_item.data(Qt.UserRole)
+            if not file_path:
+                continue
+            
+            # 强制终止任务并清理资源
+            if self._terminate_and_cleanup_task(file_path, status_item):
+                terminated_count += 1
+            
+            # 删除行
+            self.table.removeRow(row)
+            deleted_count += 1
+        
+        # 5. 更新按钮状态
+        self.update_start_button_state()
+        
+        if deleted_count > 0:
+            msg = f"已删除 {deleted_count} 个任务"
+            if terminated_count > 0:
+                msg += f"（其中 {terminated_count} 个已强制终止）"
+            InfoBar.success(
+                title='删除成功',
+                content=msg,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
 
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
@@ -587,8 +1157,18 @@ class MainWindow(FluentWindow):
         if title == "更新":
             sys.exit(0)
 
-def video2audio(input_file: str, output: str = "") -> bool:
-    """使用ffmpeg将视频转换为音频"""
+def video2audio(input_file: str, output: str = "", worker=None) -> bool:
+    """使用ffmpeg将视频转换为音频（支持取消）
+    
+    Args:
+        input_file: 输入视频文件路径
+        output: 输出音频文件路径
+        worker: ASRWorker实例，用于检查取消状态和设置ffmpeg进程
+    """
+    # 检查是否已取消
+    if worker and worker.is_cancelled():
+        return False
+    
     # 创建output目录
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -603,11 +1183,51 @@ def video2audio(input_file: str, output: str = "") -> bool:
         '-y',
         output
     ]
-    result = subprocess.run(cmd, capture_output=True, check=True, encoding='utf-8', errors='replace')
-
-    if result.returncode == 0 and Path(output).is_file():
-        return True
-    else:
+    
+    try:
+        # Windows使用CREATE_NEW_PROCESS_GROUP以便能够终止进程树
+        if platform.system() == "Windows":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            creationflags = 0
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=creationflags,
+            encoding='utf-8',
+            errors='replace'
+        )
+        
+        # 保存进程引用到worker
+        if worker:
+            worker._ffmpeg_process = process
+        
+        # 等待进程完成，同时检查取消状态
+        stdout, stderr = process.communicate()
+        
+        # 检查是否被取消
+        if worker and worker.is_cancelled():
+            # 尝试删除未完成的输出文件
+            try:
+                if os.path.exists(output):
+                    os.remove(output)
+                    logging.info(f"已删除未完成的音频文件: {output}")
+            except Exception as e:
+                logging.warning(f"删除未完成文件失败: {e}")
+            return False
+        
+        if process.returncode == 0 and Path(output).is_file():
+            return True
+        else:
+            return False
+            
+    except subprocess.CalledProcessError as e:
+        logging.error(f"ffmpeg转换失败: {e}")
+        return False
+    except Exception as e:
+        logging.error(f"ffmpeg执行出错: {e}")
         return False
 
 def start():
