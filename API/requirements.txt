@@ -1,0 +1,6 @@
+# AsrTools API Requirements
+requests>=2.25.0
+
+# Optional dependencies
+# PyQt5>=5.15.0
+# PyQt-Fluent-Widgets>=1.0.0

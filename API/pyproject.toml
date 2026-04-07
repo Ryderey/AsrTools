@@ -1,0 +1,50 @@
+[project]
+name = "asrtools-api"
+version = "1.0.0"
+description = "AsrTools API - 语音识别和字幕生成工具"
+authors = [{name = "Your Name", email = "your.email@example.com"}]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.25.0",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15.0", "PyQt-Fluent-Widgets>=1.0.0"]
+dev = ["pytest>=6.0.0", "black>=21.0.0", "flake8>=3.8.0"]
+
+[project.scripts]
+asr-api = "API.asr_api:main"
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+# uv-specific configuration
+managed = true
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | _build
+  | buck-out
+  | build
+  | dist
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

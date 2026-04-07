@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+.env
+.venv/
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+.history
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Local configuration
+config.ini
+.env
+.secrets
+
+# Temporary files
+*.tmp
+*.temp
+~$*
+
+# Audio/Video processing cache
+bk_asr/asr_cache.json
+temp/
+tmp/
+
+# Subtitle output files (optional - uncomment if you don't want to track output files)
+# *.srt
+# *.ass
+# *.txt
+
+# Windows
+$RECYCLE.BIN/
+Desktop.ini
+
+# Linux
+.*
+!.gitignore
+!.github/
