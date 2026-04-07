@@ -49,6 +49,9 @@ config.ini
 *.tmp
 *.temp
 ~$*
+优化清单.md
+打包说明.md
+ffmpeg.exe
 
 # Audio/Video processing cache
 bk_asr/asr_cache.json

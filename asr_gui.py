@@ -20,8 +20,6 @@ from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentI
                             FluentWindow, BodyLabel, MessageBox)
 
 from bk_asr.BcutASR import BcutASR
-from bk_asr.JianYingASR import JianYingASR
-from bk_asr.KuaiShouASR import KuaiShouASR
 
 # 设置日志配置
 logging.basicConfig(
@@ -62,19 +60,8 @@ class ASRWorker(QRunnable):
             else:
                 self.audio_path = self.file_path
             
-            # 根据选择的 ASR 引擎实例化相应的类
-            if self.asr_engine == 'B 接口':
-                asr = BcutASR(self.audio_path, use_cache=use_cache)
-            elif self.asr_engine == 'J 接口':
-                asr = JianYingASR(self.audio_path, use_cache=use_cache)
-            elif self.asr_engine == 'K 接口':
-                asr = KuaiShouASR(self.audio_path, use_cache=use_cache)
-            elif self.asr_engine == 'Whisper':
-                # from bk_asr.WhisperASR import WhisperASR
-                # asr = WhisperASR(self.file_path, use_cache=use_cache)
-                raise NotImplementedError("WhisperASR 暂未实现")
-            else:
-                raise ValueError(f"未知的 ASR 引擎: {self.asr_engine}")
+            # 使用B接口进行ASR识别
+            asr = BcutASR(self.audio_path, use_cache=use_cache)
 
             logging.info(f"开始处理文件: {self.file_path} 使用引擎: {self.asr_engine}")
             result = asr.run()
@@ -142,7 +129,7 @@ class ASRWidget(QWidget):
         engine_label = BodyLabel("选择接口:", self)
         engine_label.setFixedWidth(70)
         self.combo_box = ComboBox(self)
-        self.combo_box.addItems(['B 接口', 'J 接口', 'K 接口', 'Whisper'])
+        self.combo_box.addItems(['B 接口'])
         engine_layout.addWidget(engine_label)
         engine_layout.addWidget(self.combo_box)
         layout.addLayout(engine_layout)
@@ -170,21 +157,44 @@ class ASRWidget(QWidget):
 
         # 文件列表表格
         self.table = TableWidget(self)
-        self.table.setColumnCount(2)
-        self.table.setHorizontalHeaderLabels(['文件名', '状态'])
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(['', '文件名', '状态'])
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         layout.addWidget(self.table)
 
         # 设置表格列的拉伸模式
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Fixed)
-        self.table.setColumnWidth(1, 100)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        self.table.setColumnWidth(0, 40)
+        self.table.setColumnWidth(2, 100)
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        # 连接表格item变化信号，用于监听复选框状态变化
+        self.table.itemChanged.connect(self.on_table_item_changed)
+
+        # 批量操作按钮区域
+        batch_layout = QHBoxLayout()
+        
+        # 全选/取消全选按钮
+        self.select_all_button = PushButton("全选", self)
+        self.select_all_button.clicked.connect(self.toggle_select_all)
+        self.select_all_button.setEnabled(False)
+        batch_layout.addWidget(self.select_all_button)
+        
+        # 批量处理选中任务按钮
+        self.batch_process_button = PushButton("批量处理选中任务", self)
+        self.batch_process_button.clicked.connect(self.process_selected_files)
+        self.batch_process_button.setEnabled(False)
+        batch_layout.addWidget(self.batch_process_button)
+        
+        batch_layout.addStretch()
+        layout.addLayout(batch_layout)
 
         # 处理按钮
-        self.process_button = PushButton("开始处理", self)
+        self.process_button = PushButton("开始处理全部", self)
         self.process_button.clicked.connect(self.process_files)
         self.process_button.setEnabled(False)  # 初始禁用
         layout.addWidget(self.process_button)
@@ -215,12 +225,22 @@ class ASRWidget(QWidget):
 
         row_count = self.table.rowCount()
         self.table.insertRow(row_count)
+        
+        # 复选框列
+        checkbox_item = QTableWidgetItem()
+        checkbox_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+        checkbox_item.setCheckState(Qt.Unchecked)
+        self.table.setItem(row_count, 0, checkbox_item)
+        
+        # 文件名列
         item_filename = self.create_non_editable_item(os.path.basename(file_path))
+        item_filename.setData(Qt.UserRole, file_path)
+        self.table.setItem(row_count, 1, item_filename)
+        
+        # 状态列
         item_status = self.create_non_editable_item("未处理")
         item_status.setForeground(QColor("gray"))
-        self.table.setItem(row_count, 0, item_filename)
-        self.table.setItem(row_count, 1, item_status)
-        item_filename.setData(Qt.UserRole, file_path)
+        self.table.setItem(row_count, 2, item_status)
 
     def create_non_editable_item(self, text):
         """创建不可编辑的表格项"""
@@ -252,7 +272,7 @@ class ASRWidget(QWidget):
         """删除选中的行"""
         current_row = self.table.currentRow()
         if current_row >= 0:
-            file_path = self.table.item(current_row, 0).data(Qt.UserRole)
+            file_path = self.table.item(current_row, 1).data(Qt.UserRole)
             if file_path in self.workers:
                 worker = self.workers[file_path]
                 worker.signals.finished.disconnect(self.update_table)
@@ -267,7 +287,7 @@ class ASRWidget(QWidget):
         """打开文件所在目录"""
         current_row = self.table.currentRow()
         if current_row >= 0:
-            current_item = self.table.item(current_row, 0)
+            current_item = self.table.item(current_row, 1)
             if current_item:
                 file_path = current_item.data(Qt.UserRole)
                 directory = os.path.dirname(file_path)
@@ -293,8 +313,8 @@ class ASRWidget(QWidget):
         """重新处理选中的文件"""
         current_row = self.table.currentRow()
         if current_row >= 0:
-            file_path = self.table.item(current_row, 0).data(Qt.UserRole)
-            status = self.table.item(current_row, 1).text()
+            file_path = self.table.item(current_row, 1).data(Qt.UserRole)
+            status = self.table.item(current_row, 2).text()
             if status == "处理中":
                 InfoBar.warning(
                     title='当前文件正在处理中',
@@ -316,8 +336,8 @@ class ASRWidget(QWidget):
     def process_files(self):
         """处理所有未处理的文件"""
         for row in range(self.table.rowCount()):
-            if self.table.item(row, 1).text() == "未处理":
-                file_path = self.table.item(row, 0).data(Qt.UserRole)
+            if self.table.item(row, 2).text() == "未处理":
+                file_path = self.table.item(row, 1).data(Qt.UserRole)
                 self.processing_queue.append(file_path)
         self.process_next_in_queue()
 
@@ -342,7 +362,7 @@ class ASRWidget(QWidget):
         if row != -1:
             status_item = self.create_non_editable_item("处理中")
             status_item.setForeground(QColor("orange"))
-            self.table.setItem(row, 1, status_item)
+            self.table.setItem(row, 2, status_item)
             self.update_start_button_state()
 
     def update_table(self, file_path, result):
@@ -351,11 +371,11 @@ class ASRWidget(QWidget):
         if row != -1:
             item_status = self.create_non_editable_item("已处理")
             item_status.setForeground(QColor("green"))
-            self.table.setItem(row, 1, item_status)
+            self.table.setItem(row, 2, item_status)
 
             InfoBar.success(
                 title='处理完成',
-                content=f"文件 {self.table.item(row, 0).text()} 已处理完成",
+                content=f"文件 {self.table.item(row, 1).text()} 已处理完成",
                 orient=Qt.Horizontal,
                 isClosable=True,
                 position=InfoBarPosition.TOP,
@@ -373,7 +393,7 @@ class ASRWidget(QWidget):
         if row != -1:
             item_status = self.create_non_editable_item("错误")
             item_status.setForeground(QColor("red"))
-            self.table.setItem(row, 1, item_status)
+            self.table.setItem(row, 2, item_status)
 
             InfoBar.error(
                 title='处理出错',
@@ -392,18 +412,87 @@ class ASRWidget(QWidget):
     def find_row_by_file_path(self, file_path):
         """根据文件路径查找表格中的行号"""
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
+            item = self.table.item(row, 1)
             if item.data(Qt.UserRole) == file_path:
                 return row
         return -1
 
     def update_start_button_state(self):
-        """根据文件列表更新开始处理按钮的状态"""
+        """根据文件列表更新按钮的状态"""
+        has_files = self.table.rowCount() > 0
         has_unprocessed = any(
-            self.table.item(row, 1).text() == "未处理"
+            self.table.item(row, 2) is not None and self.table.item(row, 2).text() == "未处理"
+            for row in range(self.table.rowCount())
+        )
+        has_selected = any(
+            self.table.item(row, 0) is not None and self.table.item(row, 0).checkState() == Qt.Checked
             for row in range(self.table.rowCount())
         )
         self.process_button.setEnabled(has_unprocessed)
+        self.select_all_button.setEnabled(has_files)
+        self.batch_process_button.setEnabled(has_selected)
+
+    def on_table_item_changed(self, item):
+        """处理表格项变化（复选框状态变化）"""
+        # 只处理第0列（复选框列）的变化
+        if item.column() == 0:
+            self.update_start_button_state()
+            # 更新全选按钮文本
+            if self.table.rowCount() > 0:
+                all_checked = all(
+                    self.table.item(row, 0).checkState() == Qt.Checked
+                    for row in range(self.table.rowCount())
+                )
+                self.select_all_button.setText("取消全选" if all_checked else "全选")
+
+    def toggle_select_all(self):
+        """全选/取消全选"""
+        all_checked = all(
+            self.table.item(row, 0).checkState() == Qt.Checked
+            for row in range(self.table.rowCount())
+        )
+        new_state = Qt.Unchecked if all_checked else Qt.Checked
+        for row in range(self.table.rowCount()):
+            self.table.item(row, 0).setCheckState(new_state)
+        self.select_all_button.setText("取消全选" if not all_checked else "全选")
+        self.update_start_button_state()
+
+    def process_selected_files(self):
+        """批量处理选中的文件"""
+        selected_files = []
+        for row in range(self.table.rowCount()):
+            if self.table.item(row, 0).checkState() == Qt.Checked:
+                status = self.table.item(row, 2).text()
+                if status == "未处理":
+                    file_path = self.table.item(row, 1).data(Qt.UserRole)
+                    selected_files.append(file_path)
+                elif status == "处理中":
+                    file_path = self.table.item(row, 1).data(Qt.UserRole)
+                    InfoBar.warning(
+                        title='文件正在处理中',
+                        content=f"文件 {os.path.basename(file_path)} 正在处理中，已跳过。",
+                        orient=Qt.Horizontal,
+                        isClosable=True,
+                        position=InfoBarPosition.TOP,
+                        duration=2000,
+                        parent=self
+                    )
+        
+        if not selected_files:
+            InfoBar.warning(
+                title='没有可处理的文件',
+                content="请勾选未处理的文件。",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
+            return
+        
+        for file_path in selected_files:
+            self.processing_queue.append(file_path)
+        self.process_next_in_queue()
 
     def dragEnterEvent(self, event):
         """拖拽进入事件"""
