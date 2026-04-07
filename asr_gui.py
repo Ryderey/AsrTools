@@ -464,6 +464,13 @@ class ASRWidget(QWidget):
         batch_layout.addStretch()
         layout.addLayout(batch_layout)
 
+        # 清空已完成按钮
+        self.clear_completed_button = PushButton("清空已完成", self)
+        self.clear_completed_button.setIcon(FIF.BROOM)  # 使用扫帚图标表示清理
+        self.clear_completed_button.clicked.connect(self.clear_completed_tasks)
+        self.clear_completed_button.setEnabled(False)
+        layout.addWidget(self.clear_completed_button)
+
         # 处理按钮
         self.process_button = PushButton("开始处理全部", self)
         self.process_button.clicked.connect(self.process_files)
@@ -816,12 +823,21 @@ class ASRWidget(QWidget):
                 has_reprocessable = True
                 break
         
+        # 检查是否有已完成的任务（用于清空按钮）
+        has_completed = False
+        for row in range(self.table.rowCount()):
+            status_item = self.table.item(row, 2)
+            if status_item is not None and status_item.text() == "已处理":
+                has_completed = True
+                break
+        
         # 更新按钮状态
         self.process_button.setEnabled(has_unprocessed)
         self.select_all_button.setEnabled(has_files)
         self.batch_process_button.setEnabled(has_selected)
         self.batch_reprocess_button.setEnabled(has_reprocessable)
         self.batch_delete_button.setEnabled(has_selected)
+        self.clear_completed_button.setEnabled(has_completed)
 
     def on_table_item_changed(self, item):
         """处理表格项变化（复选框状态变化）"""
@@ -1150,6 +1166,80 @@ class ASRWidget(QWidget):
                 isClosable=True,
                 position=InfoBarPosition.TOP,
                 duration=2000,
+                parent=self
+            )
+
+    def clear_completed_tasks(self):
+        """清空所有已完成的任务（健壮性实现）"""
+        try:
+            # 健壮性检查1: 确保表格有数据
+            if self.table.rowCount() == 0:
+                return
+            
+            # 收集需要删除的行索引（逆序存储以避免索引错乱）
+            rows_to_delete = []
+            
+            for row in range(self.table.rowCount()):
+                # 健壮性检查2: 确保状态列存在
+                status_item = self.table.item(row, 2)
+                if status_item is not None and status_item.text() == "已处理":
+                    rows_to_delete.append(row)
+            
+            # 健壮性检查3: 如果没有已完成的任务，直接返回
+            if not rows_to_delete:
+                return
+            
+            # 逆序删除以避免索引错乱
+            rows_to_delete.sort(reverse=True)
+            
+            # 批量删除操作，暂时禁用表格更新以提高性能
+            self.table.setUpdatesEnabled(False)
+            try:
+                for row in rows_to_delete:
+                    # 清理worker引用（如果存在）
+                    filename_item = self.table.item(row, 1)
+                    if filename_item:
+                        file_path = filename_item.data(Qt.UserRole)
+                        if file_path and file_path in self.workers:
+                            try:
+                                worker = self.workers[file_path]
+                                worker.signals.finished.disconnect(self.update_table)
+                                worker.signals.errno.disconnect(self.handle_error)
+                                worker.signals.cancelled.disconnect(self.handle_cancelled)
+                            except Exception:
+                                pass
+                            self.workers.pop(file_path, None)
+                    
+                    # 删除行
+                    self.table.removeRow(row)
+            finally:
+                # 恢复表格更新
+                self.table.setUpdatesEnabled(True)
+            
+            # 更新所有按钮状态
+            self.update_start_button_state()
+            
+            # 显示成功提示
+            InfoBar.success(
+                title='清空成功',
+                content=f'已清空 {len(rows_to_delete)} 个已完成的任务',
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+                parent=self
+            )
+            
+        except Exception as e:
+            # 健壮性处理: 记录错误但不崩溃程序
+            logging.error(f"清空已完成任务时出错: {str(e)}")
+            InfoBar.error(
+                title='清空失败',
+                content='清空操作遇到错误，请稍后重试',
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
                 parent=self
             )
 

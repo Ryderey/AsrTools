@@ -54,6 +54,7 @@ config.ini
 ffmpeg.exe
 批量操作优化清单.md
 临时文件管理优化清单.md
+临时文件与清空功能优化清单.md
 
 # Audio/Video processing cache
 bk_asr/asr_cache.json
