@@ -53,6 +53,7 @@ config.ini
 打包说明.md
 ffmpeg.exe
 批量操作优化清单.md
+临时文件管理优化清单.md
 
 # Audio/Video processing cache
 bk_asr/asr_cache.json
@@ -67,7 +68,7 @@ tmp/
 # Windows
 $RECYCLE.BIN/
 Desktop.ini
-.gitignore
+
 
 # Linux
 .*

@@ -14,10 +14,10 @@ plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', '
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 
 from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, \
-    pyqtSignal
+    pyqtSignal, QSettings
 from PyQt5.QtGui import QCursor, QColor, QFont
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-                             QTableWidgetItem, QHeaderView, QSizePolicy)
+                             QTableWidgetItem, QHeaderView, QSizePolicy, QCheckBox)
 from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentIcon as FIF,
                             Action, RoundMenu, InfoBar, InfoBarPosition,
                             FluentWindow, BodyLabel, MessageBox)
@@ -37,23 +37,26 @@ class WorkerSignals(QObject):
     cancelled = Signal(str)  # 新增：任务被取消信号
 
 
+
+
 class ASRWorker(QRunnable):
-    """ASR处理工作线程（支持强制终止）"""
+    """ASR处理工作线程（支持强制终止和临时文件管理）"""
     _workers = {}  # 类变量：跟踪所有活动的worker
     _lock = threading.Lock()
     
-    def __init__(self, file_path, asr_engine, export_format):
+    def __init__(self, file_path, asr_engine, export_format, delete_temp_audio=False):
         super().__init__()
         self.file_path = file_path
         self.asr_engine = asr_engine
         self.export_format = export_format
+        self.delete_temp_audio = delete_temp_audio  # 是否自动删除临时音频文件
         self.signals = WorkerSignals()
         
         self.audio_path = None
+        self.is_temp_audio = False  # 标记是否为临时音频文件
         self._is_cancelled = False
         self._cancel_lock = threading.Lock()
         self._ffmpeg_process = None
-        self._temp_files = []  # 跟踪临时文件
         
         # 注册到活动worker字典
         with ASRWorker._lock:
@@ -97,16 +100,42 @@ class ASRWorker(QRunnable):
             except Exception as e:
                 logging.warning(f"终止ffmpeg进程时出错: {e}")
     
-    def _cleanup_temp_files(self):
-        """清理临时文件"""
-        for temp_file in self._temp_files:
+    def cleanup_temp_audio(self, force_delete=False):
+        """清理临时音频文件的健壮实现
+        
+        Args:
+            force_delete: 是否强制删除（用于用户手动取消/删除/重新处理时）
+        
+        Returns:
+            bool: 是否成功删除
+        """
+        # 健壮性检查1: 确保是临时音频文件
+        if not self.is_temp_audio or not self.audio_path:
+            return False
+        
+        # 健壮性检查2: 检查文件是否存在
+        if not os.path.exists(self.audio_path):
+            return False
+        
+        # 健壮性检查3: 只有在用户启用自动删除或强制删除时才执行
+        should_delete = force_delete or self.delete_temp_audio
+        
+        if should_delete:
             try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                    logging.info(f"已删除临时文件: {temp_file}")
-            except Exception as e:
-                logging.warning(f"删除临时文件失败 {temp_file}: {e}")
-        self._temp_files.clear()
+                # 健壮性检查4: 确保文件不是正在使用状态
+                with open(self.audio_path, 'rb') as f:
+                    f.read(1)  # 尝试读取，如果文件被占用会抛出异常
+                
+                os.remove(self.audio_path)
+                logging.info(f"临时音频文件已删除: {self.audio_path}")
+                return True
+                
+            except (OSError, IOError, PermissionError) as e:
+                logging.warning(f"无法删除临时文件 {self.audio_path}: {str(e)}")
+                # 健壮性处理5: 如果删除失败，记录日志但不崩溃
+                return False
+        
+        return False
     
     @staticmethod
     def get_worker(file_path):
@@ -125,6 +154,8 @@ class ASRWorker(QRunnable):
         try:
             # 检查是否已被取消
             if self.is_cancelled():
+                # 用户取消时，强制删除临时文件
+                self.cleanup_temp_audio(force_delete=True)
                 self.signals.cancelled.emit(self.file_path)
                 return
             
@@ -135,22 +166,25 @@ class ASRWorker(QRunnable):
             audio_exts = ['.mp3', '.wav']
             if not any(self.file_path.lower().endswith(ext) for ext in audio_exts):
                 temp_audio = self.file_path.rsplit(".", 1)[0] + ".mp3"
-                self._temp_files.append(temp_audio)  # 跟踪临时文件
                 
                 if not video2audio(self.file_path, temp_audio, self):
                     if self.is_cancelled():
-                        self._cleanup_temp_files()
+                        # 用户取消时，强制删除临时文件
+                        self.cleanup_temp_audio(force_delete=True)
                         self.signals.cancelled.emit(self.file_path)
                     else:
                         raise Exception("音频转换失败，确保安装ffmpeg")
                     return
                 self.audio_path = temp_audio
+                self.is_temp_audio = True  # 标记为临时文件
             else:
                 self.audio_path = self.file_path
+                self.is_temp_audio = False  # 不是临时文件
             
             # 再次检查是否被取消
             if self.is_cancelled():
-                self._cleanup_temp_files()
+                # 用户取消时，强制删除临时文件
+                self.cleanup_temp_audio(force_delete=True)
                 self.signals.cancelled.emit(self.file_path)
                 return
             
@@ -162,7 +196,8 @@ class ASRWorker(QRunnable):
             
             # 检查是否被取消
             if self.is_cancelled():
-                self._cleanup_temp_files()
+                # 用户取消时，强制删除临时文件
+                self.cleanup_temp_audio(force_delete=True)
                 self.signals.cancelled.emit(self.file_path)
                 return
             
@@ -180,8 +215,8 @@ class ASRWorker(QRunnable):
             with open(save_path, "w", encoding="utf-8") as f:
                 f.write(result_text)
             
-            # 清理临时文件（保留成功生成的字幕文件）
-            self._cleanup_temp_files()
+            # 成功完成后，根据用户设置决定是否删除临时文件
+            self.cleanup_temp_audio()
             
             # 从活动worker中移除
             ASRWorker.remove_worker(self.file_path)
@@ -193,9 +228,12 @@ class ASRWorker(QRunnable):
             ASRWorker.remove_worker(self.file_path)
             
             if self.is_cancelled():
-                self._cleanup_temp_files()
+                # 用户取消时，强制删除临时文件
+                self.cleanup_temp_audio(force_delete=True)
                 self.signals.cancelled.emit(self.file_path)
             else:
+                # 处理失败时，根据用户设置决定是否清理
+                self.cleanup_temp_audio()
                 logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
                 self.signals.errno.emit(self.file_path, f"处理时出错: {str(e)}")
 
@@ -228,15 +266,30 @@ class ASRWidget(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.init_ui()
         self.max_threads = 3  # 设置最大线程数
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(self.max_threads)
         self.processing_queue = []
         self.workers = {}  # 维护文件路径到worker的映射（用于信号连接跟踪）
+        
+        # 加载设置
+        self.load_settings()
+        
+        # 初始化UI
+        self.init_ui()
+    
+    def load_settings(self):
+        """加载用户设置"""
+        settings = QSettings("AsrTools", "Preferences")
+        self.delete_temp_audio_default = settings.value("delete_temp_audio", False, type=bool)
+    
+    def save_settings(self):
+        """保存用户设置"""
+        settings = QSettings("AsrTools", "Preferences")
+        settings.setValue("delete_temp_audio", self.delete_temp_checkbox.isChecked())
     
     def _terminate_and_cleanup_task(self, file_path, status_item=None):
-        """终止任务并清理资源
+        """终止任务并清理资源（用户手动操作时使用）
         
         Args:
             file_path: 文件路径
@@ -261,7 +314,7 @@ class ASRWidget(QWidget):
         # 2. 强制终止正在运行的worker
         worker = ASRWorker.get_worker(file_path)
         if worker:
-            worker.cancel()
+            worker.cancel()  # cancel方法会触发cleanup_temp_audio(force_delete=True)
             terminated = True
             logging.info(f"已取消任务: {file_path}")
         
@@ -276,18 +329,43 @@ class ASRWidget(QWidget):
                 pass
             self.workers.pop(file_path, None)
         
-        # 4. 删除临时文件（如果任务正在处理中，可能已经产生了临时文件）
-        if status_item and status_item.text() == "处理中":
-            # 尝试删除可能的临时mp3文件
-            try:
-                temp_audio = file_path.rsplit(".", 1)[0] + ".mp3"
-                if os.path.exists(temp_audio) and temp_audio != file_path:
-                    os.remove(temp_audio)
-                    logging.info(f"已删除临时音频文件: {temp_audio}")
-            except Exception as e:
-                logging.warning(f"删除临时文件失败: {e}")
+        # 4. 强制清理临时文件（用户手动操作时）
+        self.force_cleanup_temp_audio(file_path)
         
         return terminated
+    
+    def force_cleanup_temp_audio(self, original_file_path):
+        """强制清理与原始文件关联的临时音频文件（用户手动操作时使用）
+        
+        Args:
+            original_file_path: 原始文件路径（视频文件）
+        """
+        if not original_file_path:
+            return
+        
+        try:
+            # 推断临时文件路径
+            temp_audio_path = original_file_path.rsplit(".", 1)[0] + ".mp3"
+            
+            # 健壮性检查：确认这是临时生成的文件（不是用户原有的MP3）
+            # 并且不是原始文件本身
+            if (os.path.exists(temp_audio_path) and 
+                temp_audio_path != original_file_path and
+                not original_file_path.lower().endswith('.mp3')):
+                
+                # 检查文件是否被占用
+                try:
+                    with open(temp_audio_path, 'rb') as f:
+                        f.read(1)
+                except (OSError, IOError):
+                    logging.warning(f"临时文件被占用，无法删除: {temp_audio_path}")
+                    return
+                
+                os.remove(temp_audio_path)
+                logging.info(f"强制删除临时文件: {temp_audio_path}")
+                
+        except (OSError, IOError) as e:
+            logging.warning(f"强制删除失败: {str(e)}")
 
 
     def init_ui(self):
@@ -312,6 +390,16 @@ class ASRWidget(QWidget):
         format_layout.addWidget(format_label)
         format_layout.addWidget(self.format_combo)
         layout.addLayout(format_layout)
+
+        # 临时文件设置区域
+        temp_layout = QHBoxLayout()
+        self.delete_temp_checkbox = QCheckBox("自动删除临时音频文件", self)
+        self.delete_temp_checkbox.setChecked(self.delete_temp_audio_default)
+        self.delete_temp_checkbox.setToolTip("勾选后会在任务完成时自动删除转换过程中生成的临时MP3文件")
+        self.delete_temp_checkbox.stateChanged.connect(self.save_settings)
+        temp_layout.addWidget(self.delete_temp_checkbox)
+        temp_layout.addStretch()
+        layout.addLayout(temp_layout)
 
         # 文件选择区域
         file_layout = QHBoxLayout()
@@ -612,7 +700,8 @@ class ASRWidget(QWidget):
             
         selected_engine = self.combo_box.currentText()
         selected_format = self.format_combo.currentText()
-        worker = ASRWorker(file_path, selected_engine, selected_format)
+        delete_temp = self.delete_temp_checkbox.isChecked()
+        worker = ASRWorker(file_path, selected_engine, selected_format, delete_temp_audio=delete_temp)
         worker.signals.finished.connect(self.update_table)
         worker.signals.errno.connect(self.handle_error)
         worker.signals.cancelled.connect(self.handle_cancelled)
