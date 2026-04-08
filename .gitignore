@@ -52,9 +52,7 @@ config.ini
 优化清单.md
 打包说明.md
 ffmpeg.exe
-批量操作优化清单.md
-临时文件管理优化清单.md
-临时文件与清空功能优化清单.md
+临时MP3文件删除逻辑优化清单.md
 
 # Audio/Video processing cache
 bk_asr/asr_cache.json
