@@ -17,7 +17,7 @@ from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Sign
     pyqtSignal, QSettings
 from PyQt5.QtGui import QCursor, QColor, QFont
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
-                             QTableWidgetItem, QHeaderView, QSizePolicy, QCheckBox)
+                             QTableWidgetItem, QHeaderView, QSizePolicy, QCheckBox, QSpinBox)
 from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentIcon as FIF,
                             Action, RoundMenu, InfoBar, InfoBarPosition,
                             FluentWindow, BodyLabel, MessageBox)
@@ -276,10 +276,13 @@ class ASRWidget(QWidget):
         self.thread_pool.setMaxThreadCount(self.max_threads)
         self.processing_queue = []
         self.workers = {}  # 维护文件路径到worker的映射（用于信号连接跟踪）
-        
+
         # 加载设置
         self.load_settings()
-        
+
+        # 更新线程池设置
+        self.update_thread_pool()
+
         # 初始化UI
         self.init_ui()
     
@@ -287,11 +290,25 @@ class ASRWidget(QWidget):
         """加载用户设置"""
         settings = QSettings("AsrTools", "Preferences")
         self.delete_temp_audio_default = settings.value("delete_temp_audio", False, type=bool)
-    
+        self.max_threads = settings.value("max_threads", 3, type=int)
+        # 确保线程数在有效范围内
+        self.max_threads = max(1, min(10, self.max_threads))
+
+    def update_thread_pool(self):
+        """更新线程池设置"""
+        self.thread_pool.setMaxThreadCount(self.max_threads)
+
     def save_settings(self):
         """保存用户设置"""
         settings = QSettings("AsrTools", "Preferences")
         settings.setValue("delete_temp_audio", self.delete_temp_checkbox.isChecked())
+        settings.setValue("max_threads", self.max_threads)
+
+    def on_thread_count_changed(self, value):
+        """线程数变化时的处理"""
+        self.max_threads = value
+        self.update_thread_pool()
+        self.save_settings()
     
     def _terminate_and_cleanup_task(self, file_path, status_item=None):
         """终止任务并清理资源（用户手动操作时使用）
@@ -405,6 +422,22 @@ class ASRWidget(QWidget):
         temp_layout.addWidget(self.delete_temp_checkbox)
         temp_layout.addStretch()
         layout.addLayout(temp_layout)
+
+        # 线程数设置区域
+        thread_layout = QHBoxLayout()
+        thread_label = BodyLabel("并发线程数:", self)
+        thread_label.setFixedWidth(80)
+        self.thread_spinbox = QSpinBox(self)
+        self.thread_spinbox.setMinimum(1)
+        self.thread_spinbox.setMaximum(10)
+        self.thread_spinbox.setValue(self.max_threads)
+        self.thread_spinbox.setFixedWidth(60)
+        self.thread_spinbox.setToolTip("设置同时处理的音频文件数量 (1-10)")
+        self.thread_spinbox.valueChanged.connect(self.on_thread_count_changed)
+        thread_layout.addWidget(thread_label)
+        thread_layout.addWidget(self.thread_spinbox)
+        thread_layout.addStretch()
+        layout.addLayout(thread_layout)
 
         # 文件选择区域
         file_layout = QHBoxLayout()
@@ -1293,7 +1326,7 @@ class InfoWidget(QWidget):
 
     def init_ui(self):
         # GitHub URL 和仓库描述
-        GITHUB_URL = "https://github.com/WEIFENG2333/AsrTools"
+        GITHUB_URL = "https://github.com/Ryderey/AsrTools"
         REPO_DESCRIPTION = """
     🚀 无需复杂配置：无需 GPU 和繁琐的本地配置，小白也能轻松使用。
     🖥️ 高颜值界面：基于 PyQt5 和 qfluentwidgets，界面美观且用户友好。

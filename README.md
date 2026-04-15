@@ -1,93 +1,194 @@
 
-**注意：更多强大功能已经在我另一个项目实现:**
+# ASRTools - 语音识别工具
 
- [VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner) 基于 LLM 的智能字幕助手，无需GPU一键高质量字幕视频合成！支持生成、断句、优化、翻译全流程。让视频字幕制作简单高效！
+基于原项目：https://github.com/WEIFENG2333/AsrTools 进行修改，使用更方便
 
+## 📖 项目简介
 
-# 🎤 AsrTools
+ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具，支持多种 ASR 引擎，提供便捷的音频文件转文字功能。界面简洁友好，支持批量处理、格式导出等功能。
 
-## 🌟 **特色功能**
+## ✨ 主要优化点
 
-- 🚀 **无需复杂配置**：无需 GPU 和繁琐的本地配置，小白也能轻松使用。
-- 🖥️ **高颜值界面**：基于 **PyQt5** 和 **qfluentwidgets**，界面美观且用户友好。
-- ⚡ **效率超人**：多线程并发 + 批量处理，文字转换快如闪电。
-- 📄 **多格式支持**：支持生成 `.srt` 和 `.txt` 、`ass`字幕文件，满足不同需求。
+1. **界面简化**：界面上仅保留 B 接口（BcutASR），操作更直观
+2. **交互增强**：增加多种交互选项，提升用户体验
+   - 支持批量音频文件处理
+   - 支持多种导出格式（SRT、TXT、JSON 等）
+   - 支持临时音频文件自动清理
+   
+3. **功能完善**：
+   - 支持任务取消和强制终止
+   - 支持中文路径兼容
+   - 将ffmpeg打包进程序
+   - 去掉任务弹出的终端窗口
 
-欢迎为项目给上一个 Star ⭐ 。
+## 📸 界面截图
 
-**主界面截图示例：**
+![ASRTools 界面截图](README.assets/image-20260415204159875.png)
 
-<img src="resources/main_window-1.1.0.png" width="80%" alt="主界面">
+## 🚀 使用方式
 
+### 方式一：直接运行（推荐）
 
-## 🌟 未来计划（TODO）
+1. 从 [Release](https://github.com/Ryderey/AsrTools/releases) 页面下载最新版本
+2. 确保 `ffmpeg.exe` 与可执行文件在同一目录
+3. 双击运行即可
 
-- 🎥 视频直接处理(完成)：支持输入视频文件自动转换为音频文件，无需用户手动转换为mp3等音频格式。
-- 📄 多样化输出(完成)：增加输出格式选择，提供更多字幕格式选项，满足不同用户需求。
-- 🔀 一键字幕视频：增加视频自动加字幕功能，一键完成从视频到带字幕视频的全流程。
-- 🔗 API 集成：提供 API 接口，允许开发者将 AsrTools 集成到自己的工作流程中。
-- ✏️ 字幕编辑器：集成一个简单的字幕编辑界面，允许用户直接修改、调整时间轴和校正识别错误。
+### 方式二：源码运行
 
- 以上计划均已经实现，请访问 [VideoCaptioner](https://github.com/WEIFENG2333/VideoCaptioner)
+#### 前置条件
 
+- Python 3.8+
+- `ffmpeg.exe`（需放在项目根目录或系统 PATH 中）
 
-### 🖥️ **快速上手**
+#### 安装步骤
 
-1. **启动应用**：运行下载的可执行文件或通过命令行启动 GUI 界面。
-2. **选择 ASR 引擎**：在下拉菜单中选择你需要使用的 ASR 引擎。
-3. **添加文件**：点击“选择文件”按钮或将文件/文件夹拖拽到指定区域。
-4. **开始处理**：点击“开始处理”按钮，程序将自动开始转换，并在完成后在原音频目录生成 `.srt` 或 `.txt` 字幕文件。（默认保持 3 个线程运行）
+```bash
+# 1. 克隆项目到本地
+git clone https://github.com/Ryderey/AsrTools
+cd AsrTools
 
-## 🛠️ **安装指南**
+# 2. 创建虚拟环境（推荐使用 uv）
+# 如果没有 uv，请先安装：https://github.com/astral-sh/uv
+uv venv
 
-###  **1. 从发布版本安装**
+# 3. 激活虚拟环境（Windows）
+# 使用 uv 可直接运行，或手动激活：
+# venv\Scripts\activate
 
-我为 Windows 用户提供了打包好的[Release](https://github.com/WEIFENG2333/AsrTools/releases)版本，下载后解压即可直接使用，无需配置环境。
+# 4. 安装依赖
+uv pip install -r requirements.txt
 
-或者从网盘下载： [https://wwwm.lanzoue.com/iUJYZ2clk7xg](https://wwwm.lanzoue.com/iPKZV2eh5ina)
+# 5. 运行程序
+uv run python asr_gui.py
+```
 
-运行解压后的 `AsrTools.exe`，即可启动 GUI 界面。
+## 📦 打包说明
 
+使用 `Nuitka` 将项目打包为独立的 `.exe` 文件。
 
-###  **2. 从源码安装（开发者）**
+### 前置准备
 
-项目的依赖仅仅为 `requests`。
+打包前请确保以下文件存在：
 
-如果您需要 GUI 界面，请额外安装 `PyQt5`, `qfluentwidgets`。
+- `resources/app_icon.ico` - 应用图标
+- `ffmpeg.exe` - 音频处理依赖（需放在项目根目录）
 
-如果您想从源码运行，请按照以下步骤操作：
+### 一键打包
 
-1. **克隆仓库并进入项目目录**
+项目提供了 `build.bat` 脚本，直接运行即可打包：
 
-    ```bash
-    git clone https://github.com/WEIFENG2333/AsrTools.git
-    cd AsrTools
-    ```
+```bash
+build.bat
+```
 
-2. **安装依赖并运行**
+打包完成后，可执行文件位于 `dist/asr_gui.exe`。
 
-    - **启动 GUI 界面**
+### 手动打包
 
-        ```bash
-        pip install -r requirements.txt
-        python asr_gui.py
-        ```
+如需自定义打包参数，可运行以下命令：
+
+```bash
+uv run python -m nuitka --standalone ^
+    --onefile ^
+    --windows-icon-from-ico=resources/app_icon.ico ^
+    --windows-console-mode=disable ^
+    --windows-product-name="ASRTools" ^
+    --windows-file-description="ASR语音识别工具" ^
+    --windows-company-name="ASRTools" ^
+    --output-dir=dist ^
+    --output-filename=ASR_GUI.exe ^
+    --enable-plugin=pyqt5 ^
+    --include-data-file=ffmpeg.exe=ffmpeg.exe ^
+    --include-data-dir=bk_asr=bk_asr ^
+    --include-data-dir=resources=resources ^
+    --include-package=qfluentwidgets ^
+    --include-package=bk_asr ^
+    --remove-output ^
+    --lto=yes ^
+    asr_gui.py
+```
+
+### 打包参数说明
+
+| 参数 | 说明 |
+|------|------|
+| `--standalone` | 独立模式，包含所有依赖 |
+| `--onefile` | 打包为单个 exe 文件 |
+| `--windows-icon-from-ico` | 指定应用图标 |
+| `--windows-console-mode=disable` | 隐藏控制台窗口 |
+| `--enable-plugin=pyqt5` | 启用 PyQt5 插件支持 |
+| `--include-data-file` | 包含额外文件（如 ffmpeg.exe） |
+| `--include-data-dir` | 包含整个目录 |
+| `--include-package` | 显式包含特定包 |
+| `--remove-output` | 打包完成后删除中间文件 |
+| `--lto=yes` | 启用链接时优化，减小文件体积 |
+
+## 📁 项目结构
+
+```
+AsrTools/
+├── asr_gui.py           # 主程序入口
+├── requirements.txt     # Python 依赖
+├── build.bat           # 打包脚本
+├── bk_asr/             # ASR 引擎实现
+├── resources/          # 资源文件（图标等）
+├── ffmpeg.exe          # 音频处理工具（需自行准备）
+└── dist/               # 打包输出目录
+```
+
+## ⚙️ 依赖说明
+
+### Python 依赖
+
+```
+requests
+PyQt5
+PyQt-Fluent-Widgets
+```
+
+### 外部依赖
+
+- **ffmpeg**: 音频格式转换和处理的必备工具
+  - 下载地址：https://ffmpeg.org/download.html
+  - 放置位置：项目根目录或添加到系统 PATH
+
+## 💡 使用提示
+
+1. **支持的音频格式**：MP3、WAV、FLAC、M4A 等常见格式
+2. **导出格式**：SRT（字幕文件）、TXT（纯文本）、JSON（结构化数据）
+3. **批量处理**：可同时选择多个音频文件进行识别
+4. **临时文件**：处理过程中会生成临时文件，可选择自动删除
+
+## ⚠️ 注意事项
+
+- 首次运行可能需要联网加载 ASR 服务
+- 确保网络连接正常（BcutASR 需要访问 B 站接口）
+- 大文件处理可能需要较长时间，请耐心等待
+- 识别结果可能受音频质量和网络状况影响
+
+## 📝 常见问题
+
+### Q: 提示找不到 ffmpeg.exe？
+A: 请将 `ffmpeg.exe` 放在项目根目录，或添加到系统环境变量 PATH 中。
+
+### Q: 打包后运行闪退？
+A: 请检查 `ffmpeg.exe` 和 `resources` 目录是否与打包后的 exe 在同一位置。
+
+### Q: 识别失败怎么办？
+A: 请检查网络连接，BcutASR 依赖 B 站的 ASR 服务。也可尝试其他 ASR 引擎。
+
+## 📄 许可证
+
+继承原项目的 LICENSE，详见 [LICENSE](LICENSE) 文件。
+
+## 🙏 致谢
+
+- 原项目：[WEIFENG2333/AsrTools](https://github.com/WEIFENG2333/AsrTools)
+- ASR 引擎：Bilibili Cut（BcutASR）
+- UI 框架：[PyQt-Fluent-Widgets](https://github.com/zhiyiYo/PyQt-Fluent-Widgets)
+- 打包工具：[Nuitka](https://nuitka.net/)
+
 ---
 
-## 日志
--  **（v1.1.0）已经增加视频文件支持🎥**：支持直接导入视频文件，自动转换为音频进行处理，无需手动转换。
+如有问题或建议，欢迎提交 [Issue](https://github.com/Ryderey/AsrTools/issues)
 
-## 📬 **联系与支持**
-
-- **Issues**：[提交问题](https://github.com/WEIFENG2333/AsrTools/issues)
-
-感谢您使用 **AsrTools**！🎉  
-
-目前项目的相关调用和GUI页面的功能仍在不断完善中...
-
-希望这款工具能为您带来便利。😊
-
----
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=WEIFENG2333/AsrTools&type=Date)](https://star-history.com/#WEIFENG2333/AsrTools&Date)
