@@ -83,10 +83,15 @@ class ASRWorker(QRunnable):
             try:
                 # Windows使用TASKKILL强制终止进程树
                 if platform.system() == "Windows":
+                    # 配置Windows启动信息以隐藏命令行窗口
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
                     subprocess.run(
                         ['taskkill', '/F', '/T', '/PID', str(self._ffmpeg_process.pid)],
                         capture_output=True,
-                        check=False
+                        check=False,
+                        startupinfo=startupinfo
                     )
                 else:
                     # Unix系统使用进程组终止
@@ -875,15 +880,28 @@ class ASRWidget(QWidget):
         new_state = Qt.Unchecked if all_checked else Qt.Checked
         
         # 暂时断开信号，避免频繁触发更新
-        self.table.itemChanged.disconnect(self.on_table_item_changed)
+        # 添加异常处理，防止信号未连接时崩溃
+        signal_was_connected = False
+        try:
+            self.table.itemChanged.disconnect(self.on_table_item_changed)
+            signal_was_connected = True
+        except TypeError:
+            # 信号未连接，忽略异常
+            pass
+        
         try:
             for row in range(self.table.rowCount()):
                 checkbox_item = self.table.item(row, 0)
                 if checkbox_item is not None and checkbox_item.flags() & Qt.ItemIsUserCheckable:
                     checkbox_item.setCheckState(new_state)
         finally:
-            # 恢复信号连接
-            self.table.itemChanged.connect(self.on_table_item_changed)
+            # 恢复信号连接（仅在之前成功断开的情况下）
+            if signal_was_connected:
+                try:
+                    self.table.itemChanged.connect(self.on_table_item_changed)
+                except TypeError:
+                    # 防止重复连接导致的问题
+                    pass
         
         self.select_all_button.setText("取消全选" if not all_checked else "全选")
         self.update_start_button_state()
@@ -1365,16 +1383,21 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
     
     try:
         # Windows使用CREATE_NEW_PROCESS_GROUP以便能够终止进程树
+        startupinfo = None
+        creationflags = 0
         if platform.system() == "Windows":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            creationflags = 0
+            # 配置Windows启动信息以隐藏命令行窗口
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
         
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=creationflags,
+            startupinfo=startupinfo,
             encoding='utf-8',
             errors='replace'
         )
@@ -1425,3 +1448,5 @@ def start():
 
 if __name__ == '__main__':
     start()
+
+
