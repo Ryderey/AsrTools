@@ -8,6 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "release_helpers.ps1")
 
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
@@ -156,7 +157,7 @@ function Invoke-PackagedCheck {
     if (-not (Test-Path -LiteralPath $ReportPath -PathType Leaf)) {
         throw "Packaged check did not create its report: $ReportPath"
     }
-    $Report = Get-Content -LiteralPath $ReportPath -Raw | ConvertFrom-Json
+    $Report = Read-Utf8Json -Path $ReportPath
     if ($Report.status -ne "passed" -or $Report.app_version -ne $AppVersion) {
         throw "Packaged check report is invalid: $ReportPath"
     }
