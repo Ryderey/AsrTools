@@ -5,14 +5,14 @@
 
 ## 📖 项目简介
 
-ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具，支持多种 ASR 引擎，提供便捷的音频文件转文字功能。界面简洁友好，支持批量处理、格式导出等功能。
+ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具。v1.1.0 仅正式支持 Windows 10 及以上 x64，提供 B 接口批量识别与 SRT、TXT、ASS 导出。
 
 ## ✨ 主要优化点
 
 1. **界面简化**：界面上仅保留 B 接口（BcutASR），操作更直观
 2. **交互增强**：增加多种交互选项，提升用户体验
    - 支持批量音频文件处理
-   - 支持多种导出格式（SRT、TXT、JSON 等）
+   - 支持多种导出格式（SRT、TXT、ASS）
    - 支持临时音频文件自动清理
    
 3. **功能完善**：
@@ -29,16 +29,16 @@ ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具，支持多种 A
 
 ### 方式一：直接运行（推荐）
 
-1. 从 [Release](https://github.com/Ryderey/AsrTools/releases) 页面下载最新版本
-2. 确保 `ffmpeg.exe` 与可执行文件在同一目录
-3. 双击运行即可
+1. 从交付方获取便携 ZIP，先按 `SHA256SUMS.txt` 核对哈希。
+2. 完整解压后运行根目录的 `ASRTools.exe`；不要单独复制该 EXE。
+3. Nuitka 运行时与 `ffmpeg.exe` 收纳在 `_runtime/`，应用不会调用系统 PATH 中的 FFmpeg。
 
 ### 方式二：源码运行
 
 #### 前置条件
 
-- Python 3.8+
-- `ffmpeg.exe`（需放在项目根目录或系统 PATH 中）
+- uv 管理的 CPython 3.12.13 x64
+- 经校验的 FFmpeg 8.1.2 `ffmpeg.exe`（源码运行时放在项目根目录）
 
 #### 安装步骤
 
@@ -49,91 +49,64 @@ cd AsrTools
 
 # 2. 创建虚拟环境（推荐使用 uv）
 # 如果没有 uv，请先安装：https://github.com/astral-sh/uv
-uv venv
+uv venv --python 3.12.13
 
 # 3. 激活虚拟环境（Windows）
 # 使用 uv 可直接运行，或手动激活：
-# venv\Scripts\activate
+# .venv\Scripts\activate
 
 # 4. 安装依赖
-uv pip install -r requirements.txt
+uv pip sync --python .venv\Scripts\python.exe --require-hashes requirements-release.lock
 
 # 5. 运行程序
-uv run python asr_gui.py
+.venv\Scripts\python.exe asr_gui.py
 ```
 
 ## 📦 打包说明
 
-使用 `Nuitka` 将项目打包为独立的 `.exe` 文件。
+使用 uv 锁定环境和 Nuitka standalone，从同一源码与 FFmpeg 输入生成规整的便携 ZIP。onefile 变体因安全软件查杀风险不再交付。
 
 ### 前置准备
 
 打包前请确保以下文件存在：
 
 - `resources/app_icon.ico` - 应用图标
-- `ffmpeg.exe` - 音频处理依赖（需放在项目根目录）
+- FFmpeg 8.1.2 x64 essentials `ffmpeg.exe`，SHA-256 必须为 `1326DDE4C84FF1F96FE6B8916C5BED29E163E9B5DCCF995F6F3DB069D143EC5E`
 
 ### 一键打包
 
-项目提供了 `build.bat` 脚本，直接运行即可打包：
+项目提供可失败、可复现的发布脚本；FFmpeg 路径必须显式传入：
 
 ```bash
-build.bat
+build.bat "D:\path\to\ffmpeg.exe"
 ```
 
-打包完成后，可执行文件位于 `dist/asr_gui.exe`。
+打包完成后，应用包位于 `dist/ASRTools-Windows-x64-v1.1.0/ASRTools-Windows-x64-v1.1.0-portable.zip`。
 
-### 手动打包
+发布脚本会校验 FFmpeg 版本和哈希、同步 `requirements-release.lock`、构建 standalone 运行时和轻量根启动器，并组装许可证、源码包、构建清单和 `SHA256SUMS.txt`。缺少或错用 FFmpeg 时立即失败。
 
-如需自定义打包参数，可运行以下命令：
+便携包根目录固定为：
 
-```bash
-uv run python -m nuitka --standalone ^
-    --onefile ^
-    --windows-icon-from-ico=resources/app_icon.ico ^
-    --windows-console-mode=disable ^
-    --windows-product-name="ASRTools" ^
-    --windows-file-description="ASR语音识别工具" ^
-    --windows-company-name="ASRTools" ^
-    --output-dir=dist ^
-    --output-filename=ASR_GUI.exe ^
-    --enable-plugin=pyqt5 ^
-    --include-data-file=ffmpeg.exe=ffmpeg.exe ^
-    --include-data-dir=bk_asr=bk_asr ^
-    --include-data-dir=resources=resources ^
-    --include-package=qfluentwidgets ^
-    --include-package=bk_asr ^
-    --remove-output ^
-    --lto=yes ^
-    asr_gui.py
+```text
+ASRTools.exe
+README-Windows.txt
+_runtime/
+docs/
 ```
-
-### 打包参数说明
-
-| 参数 | 说明 |
-|------|------|
-| `--standalone` | 独立模式，包含所有依赖 |
-| `--onefile` | 打包为单个 exe 文件 |
-| `--windows-icon-from-ico` | 指定应用图标 |
-| `--windows-console-mode=disable` | 隐藏控制台窗口 |
-| `--enable-plugin=pyqt5` | 启用 PyQt5 插件支持 |
-| `--include-data-file` | 包含额外文件（如 ffmpeg.exe） |
-| `--include-data-dir` | 包含整个目录 |
-| `--include-package` | 显式包含特定包 |
-| `--remove-output` | 打包完成后删除中间文件 |
-| `--lto=yes` | 启用链接时优化，减小文件体积 |
 
 ## 📁 项目结构
 
 ```
 AsrTools/
-├── asr_gui.py           # 主程序入口
-├── requirements.txt     # Python 依赖
-├── build.bat           # 打包脚本
-├── bk_asr/             # ASR 引擎实现
-├── resources/          # 资源文件（图标等）
-├── ffmpeg.exe          # 音频处理工具（需自行准备）
-└── dist/               # 打包输出目录
+├── app_runtime.py             # 应用版本和 FFmpeg 运行时合同
+├── asr_gui.py                 # 主程序入口
+├── requirements-release.lock # uv 发布依赖锁
+├── build.bat                  # 发布脚本入口
+├── scripts/                   # 构建、许可证和验证脚本
+├── release-assets/            # 交付说明模板
+├── bk_asr/                    # ASR 引擎实现
+├── resources/                 # 图标和授权测试音频
+└── dist/                      # 最终交付输出目录
 ```
 
 ## ⚙️ 依赖说明
@@ -148,14 +121,15 @@ PyQt-Fluent-Widgets
 
 ### 外部依赖
 
-- **ffmpeg**: 音频格式转换和处理的必备工具
+- **FFmpeg 8.1.2**：音频格式转换和处理的锁定组件
   - 下载地址：https://ffmpeg.org/download.html
-  - 放置位置：项目根目录或添加到系统 PATH
+  - 源码运行时放在项目根目录；发布构建通过参数显式传入
+  - 应用不回退到系统 PATH
 
 ## 💡 使用提示
 
 1. **支持的音频格式**：MP3、WAV、FLAC、M4A 等常见格式
-2. **导出格式**：SRT（字幕文件）、TXT（纯文本）、JSON（结构化数据）
+2. **导出格式**：SRT（字幕文件）、TXT（纯文本）、ASS（字幕文件）
 3. **批量处理**：可同时选择多个音频文件进行识别
 4. **临时文件**：处理过程中会生成临时文件，可选择自动删除
 
@@ -169,13 +143,13 @@ PyQt-Fluent-Widgets
 ## 📝 常见问题
 
 ### Q: 提示找不到 ffmpeg.exe？
-A: 请将 `ffmpeg.exe` 放在项目根目录，或添加到系统环境变量 PATH 中。
+A: 请重新完整解压便携包，确认 `_runtime/ffmpeg.exe` 未被安全软件隔离。源码运行时把经校验的 `ffmpeg.exe` 放在项目根目录。应用不会使用系统 PATH。
 
 ### Q: 打包后运行闪退？
-A: 请检查 `ffmpeg.exe` 和 `resources` 目录是否与打包后的 exe 在同一位置。
+A: 请先核对 `SHA256SUMS.txt`，确认安全软件未隔离文件，并完整解压便携 ZIP 后从根目录运行 `ASRTools.exe`。
 
 ### Q: 识别失败怎么办？
-A: 请检查网络连接，BcutASR 依赖 B 站的 ASR 服务。也可尝试其他 ASR 引擎。
+A: 请检查网络连接；当前版本只提供 B 接口并依赖 B 站相关服务。
 
 ## 📄 许可证
 
@@ -191,4 +165,3 @@ A: 请检查网络连接，BcutASR 依赖 B 站的 ASR 服务。也可尝试其�
 ---
 
 如有问题或建议，欢迎提交 [Issue](https://github.com/Ryderey/AsrTools/issues)
-
