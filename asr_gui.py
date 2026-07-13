@@ -1,20 +1,21 @@
 import logging
 import os
 from pathlib import Path
+import argparse
+import json
 import platform
 import subprocess
 import sys
-import webbrowser
 import signal
 import tempfile
 import threading
+import time
 
 # FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH 
 plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 
-from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSize, QThread, \
-    pyqtSignal, QSettings
+from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSettings
 from PyQt5.QtGui import QCursor, QColor, QFont
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
                              QTableWidgetItem, QHeaderView, QSizePolicy, QCheckBox, QSpinBox)
@@ -22,6 +23,7 @@ from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentI
                             Action, RoundMenu, InfoBar, InfoBarPosition,
                             FluentWindow, BodyLabel, MessageBox)
 
+from app_runtime import APP_VERSION, FFmpegUnavailableError, resolve_ffmpeg_path
 from bk_asr.BcutASR import BcutASR
 
 # 设置日志配置
@@ -178,7 +180,7 @@ class ASRWorker(QRunnable):
                         self.cleanup_temp_audio(force_delete=True)
                         self.signals.cancelled.emit(self.file_path)
                     else:
-                        raise Exception("音频转换失败，确保安装ffmpeg")
+                        raise RuntimeError("FFmpeg 音频转换未完成，请重新处理；若持续失败，请重新获取完整应用包。")
                     return
                 self.audio_path = temp_audio
                 self.is_temp_audio = True  # 标记为临时文件
@@ -241,30 +243,6 @@ class ASRWorker(QRunnable):
                 self.cleanup_temp_audio()
                 logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
                 self.signals.errno.emit(self.file_path, f"处理时出错: {str(e)}")
-
-class UpdateCheckerThread(QThread):
-    msg = pyqtSignal(str, str, str)  # 用于发送消息的信号
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-    def run(self):
-        try:
-            from check_update import check_update, check_internet_connection
-            # 检查互联网连接
-            if not check_internet_connection():
-                self.msg.emit("错误", "无法连接到互联网，请检查网络连接。", "")
-                return
-            # 检查更新
-            config = check_update(self)
-            if config:
-                if config['fource']:
-                    self.msg.emit("更新", "检测到新版本，请下载最新版本。", config['update_download_url'])
-                else:
-                    self.msg.emit("可更新", "检测到新版本，请下载最新版本。", config['update_download_url'])
-        except Exception as e:
-            pass
-
 
 class ASRWidget(QWidget):
     """ASR处理界面"""
@@ -1317,75 +1295,57 @@ class ASRWidget(QWidget):
         self.update_start_button_state()
 
 
-class InfoWidget(QWidget):
-    """个人信息界面"""
+class GuideWidget(QWidget):
+    """面向最终用户的应用内使用说明。"""
 
     def __init__(self):
         super().__init__()
         self.init_ui()
 
     def init_ui(self):
-        # GitHub URL 和仓库描述
-        GITHUB_URL = "https://github.com/Ryderey/AsrTools"
-        REPO_DESCRIPTION = """
-    🚀 无需复杂配置：无需 GPU 和繁琐的本地配置，小白也能轻松使用。
-    🖥️ 高颜值界面：基于 PyQt5 和 qfluentwidgets，界面美观且用户友好。
-    ⚡ 效率超人：多线程并发 + 批量处理，文字转换快如闪电。
-    📄 多格式支持：支持生成 .srt 和 .txt 字幕文件，满足不同需求。
-        """
-        
+        guide_text = (
+            "1. 设置输出：选择 SRT、TXT 或 ASS；并发数可设为 1–10。\n"
+            "   视频等输入会生成同目录临时 MP3，可按需开启自动清理。\n\n"
+            "2. 添加媒体：点击“选择文件”，或把媒体文件、文件夹拖入窗口。\n\n"
+            "3. 开始处理：可处理全部任务，也可勾选后批量处理。\n"
+            "   需要中止时可删除正在处理的任务；使用“重新处理”重试。\n\n"
+            "4. 获取结果：结果保存在原媒体目录，文件名不变，仅替换扩展名。\n"
+            "   识别过程需要联网访问 B 站相关服务，且原目录必须可写。"
+        )
+
         main_layout = QVBoxLayout(self)
         main_layout.setAlignment(Qt.AlignTop)
-        # main_layout.setSpacing(50)
+        main_layout.setContentsMargins(36, 28, 36, 28)
+        main_layout.setSpacing(24)
 
-        # 标题
-        title_label = BodyLabel("  ASRTools", self)
-        title_label.setFont(QFont("Segoe UI", 30, QFont.Bold))
-        title_label.setAlignment(Qt.AlignCenter)
+        title_label = BodyLabel(f"使用说明 · v{APP_VERSION}", self)
+        title_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
         main_layout.addWidget(title_label)
 
-        # 仓库描述区域
-        desc_label = BodyLabel(REPO_DESCRIPTION, self)
-        desc_label.setFont(QFont("Segoe UI", 12))
-        main_layout.addWidget(desc_label)
-
-        github_button = PushButton("GitHub 仓库", self)
-        github_button.setIcon(FIF.GITHUB)
-        github_button.setIconSize(QSize(20, 20))
-        github_button.setMinimumHeight(42)
-        github_button.clicked.connect(lambda _: webbrowser.open(GITHUB_URL))
-        main_layout.addWidget(github_button)
+        guide_label = BodyLabel(guide_text, self)
+        guide_label.setFont(QFont("Segoe UI", 11))
+        guide_label.setWordWrap(True)
+        main_layout.addWidget(guide_label)
 
 
 class MainWindow(FluentWindow):
     """主窗口"""
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('ASR Processing Tool')
+        self.setWindowTitle(f"ASRTools v{APP_VERSION}")
 
         # ASR 处理界面
         self.asr_widget = ASRWidget()
         self.asr_widget.setObjectName("main")
         self.addSubInterface(self.asr_widget, FIF.ALBUM, 'ASR Processing')
 
-        # 个人信息界面
-        self.info_widget = InfoWidget()
-        self.info_widget.setObjectName("info")  # 设置对象名称
-        self.addSubInterface(self.info_widget, FIF.GITHUB, 'About')
+        # 使用说明界面
+        self.guide_widget = GuideWidget()
+        self.guide_widget.setObjectName("guide")
+        self.addSubInterface(self.guide_widget, FIF.HELP, '使用说明')
 
         self.navigationInterface.setExpandWidth(200)
         self.resize(800, 600)
-
-        self.update_checker = UpdateCheckerThread(self)
-        self.update_checker.msg.connect(self.show_msg)
-        self.update_checker.start()
-
-    def show_msg(self, title, content, update_download_url):
-        w = MessageBox(title, content, self)
-        if w.exec() and update_download_url:
-            webbrowser.open(update_download_url)
-        if title == "更新":
-            sys.exit(0)
 
 def video2audio(input_file: str, output: str = "", worker=None) -> bool:
     """使用ffmpeg将视频转换为音频（支持取消）
@@ -1404,8 +1364,9 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
     output.parent.mkdir(parents=True, exist_ok=True)
     output = str(output)
 
+    ffmpeg_path = resolve_ffmpeg_path()
     cmd = [
-        'ffmpeg',
+        str(ffmpeg_path),
         '-i', input_file,
         '-ac', '1',
         '-f', 'mp3',
@@ -1455,15 +1416,130 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
         
         if process.returncode == 0 and Path(output).is_file():
             return True
+        error_detail = stderr.strip().splitlines()[-1] if stderr.strip() else f"退出码 {process.returncode}"
+        raise RuntimeError(f"FFmpeg 转换失败：{error_detail}。请检查输入文件是否完整且原目录可写。")
+
+    except FFmpegUnavailableError:
+        raise
+    except OSError as e:
+        logging.error(f"FFmpeg 启动失败: {e}")
+        raise FFmpegUnavailableError(
+            "随应用提供的 FFmpeg 无法启动。请重新解压完整便携包，"
+            "并确认安全软件未隔离 ffmpeg.exe；若持续失败，请向销售方重新获取应用包。"
+        ) from e
+
+
+def run_release_check(arguments: list[str]) -> int | None:
+    """Run a non-interactive check against the exact packaged executable."""
+
+    if "--release-check" not in arguments:
+        return None
+
+    parser = argparse.ArgumentParser(description="ASRTools release verification")
+    parser.add_argument(
+        "--release-check",
+        choices=("ffmpeg", "convert", "recognize", "workflow"),
+        required=True,
+    )
+    parser.add_argument("--input")
+    parser.add_argument("--output")
+    parser.add_argument("--report", required=True)
+    options = parser.parse_args(arguments)
+
+    report_path = Path(options.report).resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report = {
+        "app_version": APP_VERSION,
+        "check": options.release_check,
+        "status": "failed",
+    }
+    exit_code = 1
+
+    try:
+        if options.release_check == "ffmpeg":
+            ffmpeg_path = resolve_ffmpeg_path()
+            completed = subprocess.run(
+                [str(ffmpeg_path), "-version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            report.update(
+                status="passed",
+                ffmpeg_path=str(ffmpeg_path),
+                ffmpeg_version=completed.stdout.splitlines()[0],
+            )
+        elif options.release_check == "convert":
+            if not options.input or not options.output:
+                raise ValueError("convert 检查需要 --input 和 --output")
+            if not video2audio(options.input, options.output):
+                raise RuntimeError("FFmpeg 转换未完成")
+            output_path = Path(options.output).resolve()
+            report.update(
+                status="passed",
+                input=str(Path(options.input).resolve()),
+                output=str(output_path),
+                output_bytes=output_path.stat().st_size,
+            )
+        elif options.release_check == "recognize":
+            if not options.input or not options.output:
+                raise ValueError("recognize 检查需要 --input 和 --output")
+            result_text = BcutASR(options.input, use_cache=False).run().to_srt()
+            if not result_text.strip():
+                raise RuntimeError("B 接口返回了空识别结果")
+            output_path = Path(options.output).resolve()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(result_text, encoding="utf-8")
+            report.update(
+                status="passed",
+                input=str(Path(options.input).resolve()),
+                output=str(output_path),
+                output_bytes=output_path.stat().st_size,
+            )
         else:
-            return False
-            
-    except subprocess.CalledProcessError as e:
-        logging.error(f"ffmpeg转换失败: {e}")
-        return False
-    except Exception as e:
-        logging.error(f"ffmpeg执行出错: {e}")
-        return False
+            if not options.input:
+                raise ValueError("workflow 检查需要 --input")
+            application = QApplication.instance() or QApplication([])
+            widget = ASRWidget()
+            widget.format_combo.setCurrentText("SRT")
+            widget.add_file_to_table(options.input)
+            widget.process_files()
+
+            deadline = time.monotonic() + 180
+            task_status = "处理中"
+            while time.monotonic() < deadline:
+                application.processEvents()
+                status_item = widget.table.item(0, 2)
+                task_status = status_item.text() if status_item else "状态缺失"
+                if task_status in ("已处理", "错误", "已取消"):
+                    break
+                time.sleep(0.05)
+
+            widget.thread_pool.waitForDone(5000)
+            application.processEvents()
+            status_item = widget.table.item(0, 2)
+            task_status = status_item.text() if status_item else "状态缺失"
+            output_path = Path(options.input).resolve().with_suffix(".srt")
+            if task_status != "已处理":
+                raise RuntimeError(f"GUI 任务未完成，最终状态：{task_status}")
+            if not output_path.is_file() or output_path.stat().st_size <= 0:
+                raise RuntimeError("GUI 任务已处理，但没有生成非空 SRT 结果")
+            report.update(
+                status="passed",
+                input=str(Path(options.input).resolve()),
+                output=str(output_path),
+                output_bytes=output_path.stat().st_size,
+                task_status=task_status,
+            )
+            widget.close()
+        exit_code = 0
+    except Exception as error:
+        report["error"] = str(error)
+
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    return exit_code
 
 def start():
     # enable dpi scale
@@ -1480,6 +1556,9 @@ def start():
 
 
 if __name__ == '__main__':
-    start()
+    release_check_exit_code = run_release_check(sys.argv[1:])
+    if release_check_exit_code is None:
+        start()
+    sys.exit(release_check_exit_code)
 
 
