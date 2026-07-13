@@ -1,0 +1,18 @@
+ASRTools v{APP_VERSION} 第三方组件声明
+====================================
+
+本应用按 GNU GPL v3 分发。项目 LICENSE.txt 提供 GPLv3 全文。
+
+FFmpeg
+------
+- Version: {FFMPEG_VERSION} essentials_build (www.gyan.dev)
+- SHA-256: {FFMPEG_SHA256}
+- Build configuration includes --enable-gpl --enable-version3.
+- FFmpeg license and upstream build README are included under licenses/ffmpeg/.
+- FFmpeg source and project information: https://ffmpeg.org/
+
+Python 与 Python 包
+-------------------
+应用由 CPython、PyQt5、Qt、PyQt-Fluent-Widgets、Requests 及其依赖构建。精确版本、包元数据和安装包内可发现的许可证文件位于 licenses/python/。
+
+此文件是工程交付清单，不构成法律意见。各组件仍受其各自许可证约束。
