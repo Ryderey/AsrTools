@@ -1329,6 +1329,8 @@ class GuideWidget(QWidget):
 
         guide_label = BodyLabel(guide_text, self)
         guide_font = QFont("Segoe UI", 11) if platform.system() == "Windows" else QFont()
+        if platform.system() != "Windows":
+            guide_font.setPointSize(11)
         guide_label.setFont(guide_font)
         guide_label.setWordWrap(True)
         main_layout.addWidget(guide_label)
@@ -1352,6 +1354,14 @@ class MainWindow(FluentWindow):
 
         self.navigationInterface.setExpandWidth(200)
         self.resize(800, 600)
+
+    def closeEvent(self, event):
+        # POSIX 上 ffmpeg 运行在独立会话，不随应用退出被回收；关闭窗口时主动终止存活进程，避免孤儿。
+        with ASRWorker._lock:
+            workers = list(ASRWorker._workers.values())
+        for worker in workers:
+            worker._terminate_ffmpeg()
+        super().closeEvent(event)
 
 def video2audio(input_file: str, output: str = "", worker=None) -> bool:
     """使用ffmpeg将视频转换为音频（支持取消）

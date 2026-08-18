@@ -138,8 +138,12 @@ def verify_layout(package_root: Path) -> tuple[Path, Path]:
 
 
 def run_packaged_check(launcher: Path, arguments: list[str], report_path: Path) -> dict:
+    # 最小 PATH 环境仅适用于无界面检查（ffmpeg/convert）；workflow 类 GUI 检查需另行保留桌面会话环境。
     sanitized_path = "/usr/bin:/bin" if SYSTEM != "Windows" else ""
     environment = {"PATH": sanitized_path, "HOME": str(Path.home())}
+    for variable in ("LANG", "LC_ALL"):
+        if variable in os.environ:
+            environment[variable] = os.environ[variable]
     process = subprocess.run(
         [str(launcher), *arguments],
         cwd=launcher.parent,

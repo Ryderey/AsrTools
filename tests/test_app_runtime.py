@@ -30,14 +30,16 @@ class AppRuntimeTests(unittest.TestCase):
         self.assertEqual(FFMPEG_SHA256, FFMPEG_SHA256_BY_PLATFORM["Windows"])
 
     def test_ffmpeg_binary_name_follows_platform(self):
-        expected = "ffmpeg.exe" if platform.system() == "Windows" else "ffmpeg"
+        # 显式列出各平台期望值（不用兜底默认值），映射表写错时测试会失败。
+        expected = {"Windows": "ffmpeg.exe", "Darwin": "ffmpeg", "Linux": "ffmpeg"}[platform.system()]
         self.assertEqual(FFMPEG_FILENAME, expected)
 
     def test_supported_platform_follows_platform(self):
         expected = {
             "Windows": "Windows 10+ x64",
             "Darwin": "macOS 11+",
-        }.get(platform.system(), "Linux x64")
+            "Linux": "Linux x64",
+        }[platform.system()]
         self.assertEqual(SUPPORTED_PLATFORM, expected)
 
     def test_resolve_ffmpeg_uses_only_the_resource_directory(self):
