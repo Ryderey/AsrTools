@@ -100,7 +100,12 @@ Linux 需要桌面环境提供的 xcb 库（一般发行版默认已有）；源
 打包前请确保以下文件存在：
 
 - `resources/app_icon.ico` - 应用图标（Windows）；macOS 构建会从 `resources/app_icon.png` 生成 `.icns`
-- 对应平台的 FFmpeg 8.1.2 x64 二进制，SHA-256 必须与 `app_runtime.FFMPEG_SHA256_BY_PLATFORM` 中的条目一致（Windows 为 `1326DDE4C84FF1F96FE6B8916C5BED29E163E9B5DCCF995F6F3DB069D143EC5E`）；未固化哈希的平台首次构建会报错并打印实际哈希，核验后写入再重新构建
+- 对应平台的 FFmpeg 二进制，SHA-256 必须与 `app_runtime.FFMPEG_SHA256_BY_PLATFORM` 中的条目一致：
+  - Windows：FFmpeg 8.1.2 x64 essentials `ffmpeg.exe`，SHA-256 为 `1326DDE4C84FF1F96FE6B8916C5BED29E163E9B5DCCF995F6F3DB069D143EC5E`
+  - Linux：BtbN linux64 GPL 静态构建 `n8.1.2-44-g7c533d0f86`（release/8.1 分支：8.1.2 tag + 上游 bugfix 提交），SHA-256 为 `7E9CBECF3D568A411789EC73F6A28EABE4D37F6D2965B76CBD28AE98F018BA11`
+  - 版本校验接受精确 `8.1.2` 或 8.1 分支的 `n8.1.2-*` git-describe 形式
+  - 未固化哈希的平台首次构建会报错并打印实际哈希，核验后写入再重新构建
+- Linux 构建另需 `patchelf`（Nuitka standalone 依赖），可用 `uv tool install patchelf` 安装
 
 ### 一键打包
 
@@ -180,7 +185,7 @@ PyQt-Fluent-Widgets
 ## 📝 常见问题
 
 ### Q: 提示找不到 FFmpeg？
-A: 请重新完整解压便携包，确认 `_runtime/` 内的 FFmpeg 二进制（Windows 为 `ffmpeg.exe`）未被安全软件隔离或移除。源码运行时把经校验的 FFmpeg 放在项目根目录。应用不会使用系统 PATH。
+A: 请重新完整解压便携包，确认 `_runtime/` 内的 FFmpeg 二进制（Windows 为 `ffmpeg.exe`）未被安全软件隔离或移除。源码运行时把经校验的 FFmpeg 放在项目根目录。应用不会使用系统 PATH。关闭应用窗口时会自动终止仍在运行的随包 FFmpeg 进程；若应用被系统强制杀死（如 kill -9），可能有 FFmpeg 进程残留，需手动结束。
 
 ### Q: 打包后运行闪退？
 A: 请先核对 `SHA256SUMS.txt`，确认安全软件未隔离文件，并完整解压便携包后从根目录启动入口运行。

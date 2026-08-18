@@ -13,7 +13,7 @@ ASRTools v{APP_VERSION} Linux 使用说明
 2. 根目录仅包含启动入口、本文档、_runtime 和 docs。不要单独复制启动脚本，也不要删除或移动 _runtime。
 3. FFmpeg 与其他运行文件位于 _runtime；应用不会调用系统 PATH 中的 FFmpeg。
 4. docs 中包含许可证、第三方声明和对应源码获取说明。
-5. 随包 FFmpeg 版本为 {FFMPEG_VERSION}，SHA-256 为 {FFMPEG_SHA256}。
+5. 随包 FFmpeg 为 8.1 系列静态构建（对应 {FFMPEG_VERSION} 版本契约），以 SHA-256 {FFMPEG_SHA256} 为准。
 
 基本流程
 --------
