@@ -10,6 +10,7 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import re
@@ -55,6 +56,25 @@ def reset_known_directory(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
     path.mkdir(parents=True)
+
+
+def safe_extract_zip(archive: zipfile.ZipFile, destination: Path) -> None:
+    """Extract with a zip-slip guard and restore recorded Unix permission bits."""
+    root = destination.resolve()
+    for info in archive.infolist():
+        try:
+            target = (root / info.filename).resolve()
+            inside = os.path.commonpath([root, target]) == os.fspath(root)
+        except ValueError:
+            inside = False
+        if not inside:
+            fail(f"Unsafe member path in portable zip: {info.filename}")
+    archive.extractall(destination)
+    for info in archive.infolist():
+        mode = (info.external_attr >> 16) & 0o777
+        target = destination / info.filename
+        if mode and target.is_file():
+            target.chmod(mode)
 
 
 def verify_checksums(delivery_root: Path, portable_zip: Path, source_archive: Path) -> None:
@@ -174,13 +194,7 @@ def main() -> None:
     print("[2/4] Verifying portable package layout and licenses...")
     portable_extract = validation_root / "portable-extracted"
     with zipfile.ZipFile(portable_zip) as archive:
-        archive.extractall(portable_extract)
-        # Restore Unix permission bits recorded in the archive (launchers/executables).
-        for info in archive.infolist():
-            mode = (info.external_attr >> 16) & 0o777
-            target = portable_extract / info.filename
-            if mode and target.is_file():
-                target.chmod(mode)
+        safe_extract_zip(archive, portable_extract)
     launcher, bundled_ffmpeg = verify_layout(portable_extract)
     if sha256_of(bundled_ffmpeg) != expected_hash:
         fail(f"Bundled FFmpeg SHA-256 mismatch. Expected {expected_hash}, got {sha256_of(bundled_ffmpeg)}.")

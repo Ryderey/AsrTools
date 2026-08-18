@@ -47,7 +47,10 @@ def fail(message: str) -> None:
 def run_checked(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     result = subprocess.run(command, **kwargs)
     if result.returncode != 0:
-        fail(f"Command failed with exit code {result.returncode}: {' '.join(map(str, command))}")
+        detail = ((result.stderr or result.stdout) or "").strip()[-2000:]
+        fail(
+            f"Command failed with exit code {result.returncode}: {' '.join(map(str, command))}\n{detail}"
+        )
     return result
 
 
@@ -146,7 +149,7 @@ def build_runtime(venv_python: Path, build_root: Path) -> Path:
             "--macos-create-app-bundle",
             f"--macos-app-icon={icon_icns}",
             "--macos-app-name=ASRTools",
-            "--macos-app-version=1.1.0",
+            f"--macos-app-version={APP_VERSION}",
         ]
     run_checked(arguments, cwd=REPO_ROOT)
     dist_dirs = list(portable_build.glob("*.dist"))
@@ -163,7 +166,8 @@ def create_icns_from_png(png_path: Path, icns_path: Path) -> None:
     if iconset.exists():
         shutil.rmtree(iconset)
     iconset.mkdir()
-    for size in (16, 32, 64, 128, 256, 512):
+    # .iconset 规范仅允许 16/32/128/256/512 及其 @2x（@2x 上限 1024px）。
+    for size in (16, 32, 128, 256, 512):
         run_checked(["sips", "-z", str(size), str(size), str(png_path), "--out", str(iconset / f"icon_{size}x{size}.png")],
                     capture_output=True)
         if size <= 512:
@@ -198,8 +202,32 @@ def assemble_docs(delivery_root: Path, venv_python: Path, ffmpeg_path: Path, ffm
     collect_ffmpeg_license_material(ffmpeg_path, licenses / "ffmpeg")
     shutil.copy2(REPO_ROOT / "LICENSE", delivery_root / "LICENSE.txt")
     release_assets = REPO_ROOT / "release-assets"
+    source_archive_name = f"ASRTools-v{APP_VERSION}-source.tar.gz"
+
     expand_template(release_assets / "THIRD_PARTY_NOTICES.template.txt", delivery_root / "THIRD_PARTY_NOTICES.txt", ffmpeg_sha256)
+    if SYSTEM == "Linux":
+        # 共享模板描述的是 Windows gyan.dev 构建；按平台如实改写随包 FFmpeg 来源。
+        notices_path = delivery_root / "THIRD_PARTY_NOTICES.txt"
+        content = notices_path.read_text(encoding="utf-8")
+        content = content.replace(
+            f"Version: {FFMPEG_VERSION} essentials_build (www.gyan.dev)",
+            "Version: FFmpeg 8.1 系列（n8.1.2-44-g7c533d0f86，BtbN linux64 GPL 静态构建，"
+            "https://github.com/BtbN/FFmpeg-Builds）",
+        )
+        content = content.replace(
+            "Build configuration includes --enable-gpl --enable-version3.",
+            "Build configuration includes --enable-gpl.",
+        )
+        notices_path.write_text(content, encoding="utf-8")
+
     expand_template(release_assets / "SOURCE_CODE.template.txt", delivery_root / "SOURCE_CODE.txt", ffmpeg_sha256)
+    if SYSTEM != "Windows":
+        # Python 链源码归档为 tar.gz；模板共享自 Windows 链（zip），按实际产物名改写。
+        source_code_path = delivery_root / "SOURCE_CODE.txt"
+        content = source_code_path.read_text(encoding="utf-8")
+        content = content.replace(f"ASRTools-v{APP_VERSION}-source.zip", source_archive_name)
+        source_code_path.write_text(content, encoding="utf-8")
+
     readme_template = release_assets / f"README-{SYSTEM}.template.txt"
     if not readme_template.is_file():
         fail(f"Required release template is missing: {readme_template}")
@@ -224,8 +252,10 @@ def assemble_portable_stage(
         shutil.copytree(app_dirs[0], runtime / "ASRTools.app", symlinks=True)
         shutil.copy2(ffmpeg_path, runtime / "ASRTools.app" / "Contents" / "MacOS" / FFMPEG_FILENAME)
         launcher = stage / "ASRTools"
+        # 直接 exec 捆绑二进制以透传参数（open --args 不会送达 .app，--release-check 冒烟依赖参数透传）。
         launcher.write_text(
-            '#!/bin/sh\nexec open "$(dirname "$0")/_runtime/ASRTools.app" --args "$@"\n', encoding="utf-8"
+            '#!/bin/sh\nexec "$(dirname "$0")/_runtime/ASRTools.app/Contents/MacOS/ASRTools" "$@"\n',
+            encoding="utf-8",
         )
         launcher.chmod(0o755)
     else:
@@ -260,11 +290,16 @@ def package_artifacts(delivery_root: Path, stage: Path) -> tuple[Path, Path]:
         "release-assets", "requirements-release.in", "requirements-release.lock",
         "requirements.txt", "resources", "scripts", "tests",
     )
+    optional_items = {".python-version"}
     with tarfile.open(source_tar, "w:gz") as archive:
         for relative in source_items:
             source = REPO_ROOT / relative
-            if source.exists():
-                archive.add(source, arcname=f"ASRTools-v{APP_VERSION}-source/{relative}")
+            if not source.exists():
+                if relative in optional_items:
+                    print(f"Optional source archive entry skipped (not present): {relative}")
+                    continue
+                fail(f"Required source archive entry is missing: {relative}")
+            archive.add(source, arcname=f"ASRTools-v{APP_VERSION}-source/{relative}")
     return portable_zip, source_tar
 
 
