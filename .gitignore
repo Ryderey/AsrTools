@@ -75,3 +75,6 @@ Desktop.ini
 .*
 !.gitignore
 !.github/
+
+# macOS build artifacts
+*.app/

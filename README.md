@@ -5,7 +5,7 @@
 
 ## 📖 项目简介
 
-ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具。v1.1.0 仅正式支持 Windows 10 及以上 x64，提供 B 接口批量识别与 SRT、TXT、ASS 导出。
+ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具。v1.1.0 正式支持 Windows 10 及以上 x64、macOS 11 及以上、Linux x64，提供 B 接口批量识别与 SRT、TXT、ASS 导出。各平台交付包均由各平台本机构建（Nuitka 不支持交叉编译），并附原生构建与冒烟测试证据。
 
 ## ✨ 主要优化点
 
@@ -27,20 +27,34 @@ ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具。v1.1.0 仅正�
 
 ## 🚀 使用方式
 
-### 方式一：直接运行（推荐）
+### 方式一：直接运行便携包（推荐）
+
+**Windows**
 
 1. 从交付方获取便携 ZIP，先按 `SHA256SUMS.txt` 核对哈希。
 2. 完整解压后运行根目录的 `ASRTools.exe`；不要单独复制该 EXE。
 3. Nuitka 运行时与 `ffmpeg.exe` 收纳在 `_runtime/`，应用不会调用系统 PATH 中的 FFmpeg。
 
+**Linux**
+
+1. 从交付方获取便携包（zip），先按 `SHA256SUMS.txt` 核对哈希（`sha256sum -c SHA256SUMS.txt`）。
+2. 完整解压后在终端运行根目录的 `./ASRTools`；不要单独复制启动脚本。
+3. Nuitka 运行时与随包 `ffmpeg` 收纳在 `_runtime/`，应用不会调用系统 PATH 中的 FFmpeg。
+
+**macOS**
+
+1. 从交付方获取便携包，先按 `SHA256SUMS.txt` 核对哈希（`shasum -a 256 -c SHA256SUMS.txt`）。
+2. 完整解压后运行根目录的 `./ASRTools`（将打开 `_runtime` 内的 `ASRTools.app`）。
+3. 未签名与公证，首次运行如被 Gatekeeper 拦截，请在“系统设置 > 隐私与安全性”中确认来源。
+
 ### 方式二：源码运行
 
 #### 前置条件
 
-- uv 管理的 CPython 3.12.13 x64
-- 经校验的 FFmpeg 8.1.2 `ffmpeg.exe`（源码运行时放在项目根目录）
+- uv 管理的 CPython 3.12.13 x64（Windows）；macOS/Linux 使用 CPython 3.12 即可
+- 经校验的 FFmpeg 8.1.2（Windows 为 `ffmpeg.exe`，macOS/Linux 为 `ffmpeg`，源码运行时放在项目根目录）
 
-#### 安装步骤
+#### 安装步骤（Windows）
 
 ```bash
 # 1. 克隆项目到本地
@@ -62,34 +76,57 @@ uv pip sync --python .venv\Scripts\python.exe --require-hashes requirements-rele
 .venv\Scripts\python.exe asr_gui.py
 ```
 
+#### 安装步骤（macOS / Linux）
+
+```bash
+git clone https://github.com/Ryderey/AsrTools
+cd AsrTools
+
+uv venv --python 3.12
+uv pip sync --python .venv/bin/python --require-hashes requirements-release.lock
+
+# 把经校验的 ffmpeg 放到项目根目录后运行：
+.venv/bin/python asr_gui.py
+```
+
+Linux 需要桌面环境提供的 xcb 库（一般发行版默认已有）；源码运行时同样不使用系统 PATH 中的 FFmpeg。
+
 ## 📦 打包说明
 
-使用 uv 锁定环境和 Nuitka standalone，从同一源码与 FFmpeg 输入生成规整的便携 ZIP。onefile 变体因安全软件查杀风险不再交付。
+使用 uv 锁定环境和 Nuitka standalone，从同一源码与 FFmpeg 输入生成规整的便携包。onefile 变体因安全软件查杀风险不再交付。**Nuitka 不支持交叉编译：Windows/macOS/Linux 三个平台的交付包必须在对应平台本机构建。**
 
 ### 前置准备
 
 打包前请确保以下文件存在：
 
-- `resources/app_icon.ico` - 应用图标
-- FFmpeg 8.1.2 x64 essentials `ffmpeg.exe`，SHA-256 必须为 `1326DDE4C84FF1F96FE6B8916C5BED29E163E9B5DCCF995F6F3DB069D143EC5E`
+- `resources/app_icon.ico` - 应用图标（Windows）；macOS 构建会从 `resources/app_icon.png` 生成 `.icns`
+- 对应平台的 FFmpeg 8.1.2 x64 二进制，SHA-256 必须与 `app_runtime.FFMPEG_SHA256_BY_PLATFORM` 中的条目一致（Windows 为 `1326DDE4C84FF1F96FE6B8916C5BED29E163E9B5DCCF995F6F3DB069D143EC5E`）；未固化哈希的平台首次构建会报错并打印实际哈希，核验后写入再重新构建
 
 ### 一键打包
 
-项目提供可失败、可复现的发布脚本；FFmpeg 路径必须显式传入：
+**Windows**：项目提供可失败、可复现的发布脚本；FFmpeg 路径必须显式传入：
 
 ```bash
 build.bat "D:\path\to\ffmpeg.exe"
 ```
 
-打包完成后，应用包位于 `dist/ASRTools-Windows-x64-v1.1.0/ASRTools-Windows-x64-v1.1.0-portable.zip`。
+**macOS / Linux**：使用 Python 版发布脚本（阶段与 Windows 链对齐）：
+
+```bash
+python3 scripts/build_release.py --ffmpeg-path /path/to/ffmpeg
+```
+
+打包完成后，Windows 应用包位于 `dist/ASRTools-Windows-x64-v1.1.0/ASRTools-Windows-x64-v1.1.0-portable.zip`；macOS/Linux 应用包位于 `dist/ASRTools-<平台>-v1.1.0/` 下对应的 `.zip`。
 
 发布脚本会校验 FFmpeg 版本和哈希、同步 `requirements-release.lock`、构建 standalone 运行时和轻量根启动器，并组装许可证、源码包、构建清单和 `SHA256SUMS.txt`。缺少或错用 FFmpeg 时立即失败。
+
+发布后可用 `python3 scripts/validate_release.py --ffmpeg-path /path/to/ffmpeg`（Windows 为 `validate_release.ps1`）对打包产物做布局校验与冒烟检查，产出 `VALIDATION-REPORT.md`。
 
 便携包根目录固定为：
 
 ```text
-ASRTools.exe
-README-Windows.txt
+ASRTools（Windows 为 ASRTools.exe）
+README-<平台>.txt
 _runtime/
 docs/
 ```
@@ -123,7 +160,7 @@ PyQt-Fluent-Widgets
 
 - **FFmpeg 8.1.2**：音频格式转换和处理的锁定组件
   - 下载地址：https://ffmpeg.org/download.html
-  - 源码运行时放在项目根目录；发布构建通过参数显式传入
+  - 源码运行时放在项目根目录（Windows 为 `ffmpeg.exe`，macOS/Linux 为 `ffmpeg`）；发布构建通过参数显式传入
   - 应用不回退到系统 PATH
 
 ## 💡 使用提示
@@ -142,11 +179,11 @@ PyQt-Fluent-Widgets
 
 ## 📝 常见问题
 
-### Q: 提示找不到 ffmpeg.exe？
-A: 请重新完整解压便携包，确认 `_runtime/ffmpeg.exe` 未被安全软件隔离。源码运行时把经校验的 `ffmpeg.exe` 放在项目根目录。应用不会使用系统 PATH。
+### Q: 提示找不到 FFmpeg？
+A: 请重新完整解压便携包，确认 `_runtime/` 内的 FFmpeg 二进制（Windows 为 `ffmpeg.exe`）未被安全软件隔离或移除。源码运行时把经校验的 FFmpeg 放在项目根目录。应用不会使用系统 PATH。
 
 ### Q: 打包后运行闪退？
-A: 请先核对 `SHA256SUMS.txt`，确认安全软件未隔离文件，并完整解压便携 ZIP 后从根目录运行 `ASRTools.exe`。
+A: 请先核对 `SHA256SUMS.txt`，确认安全软件未隔离文件，并完整解压便携包后从根目录启动入口运行。
 
 ### Q: 识别失败怎么办？
 A: 请检查网络连接；当前版本只提供 B 接口并依赖 B 站相关服务。

@@ -11,9 +11,10 @@ import tempfile
 import threading
 import time
 
-# FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH 
-plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
-os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
+# FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH
+if platform.system() == "Windows":
+    plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
+    os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 
 from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSettings
 from PyQt5.QtGui import QCursor, QColor, QFont
@@ -1319,11 +1320,16 @@ class GuideWidget(QWidget):
         main_layout.setSpacing(24)
 
         title_label = BodyLabel(f"使用说明 · v{APP_VERSION}", self)
-        title_label.setFont(QFont("Segoe UI", 24, QFont.Bold))
+        title_font = QFont("Segoe UI", 24, QFont.Bold) if platform.system() == "Windows" else QFont()
+        if platform.system() != "Windows":
+            title_font.setPointSize(24)
+            title_font.setBold(True)
+        title_label.setFont(title_font)
         main_layout.addWidget(title_label)
 
         guide_label = BodyLabel(guide_text, self)
-        guide_label.setFont(QFont("Segoe UI", 11))
+        guide_font = QFont("Segoe UI", 11) if platform.system() == "Windows" else QFont()
+        guide_label.setFont(guide_font)
         guide_label.setWordWrap(True)
         main_layout.addWidget(guide_label)
 
@@ -1376,24 +1382,26 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
     ]
     
     try:
-        # Windows使用CREATE_NEW_PROCESS_GROUP以便能够终止进程树
-        startupinfo = None
-        creationflags = 0
+        # Windows使用CREATE_NEW_PROCESS_GROUP以便能够终止进程树；
+        # POSIX使用start_new_session隔离进程组，避免取消任务时连带终止整个应用
+        popen_kwargs = {}
         if platform.system() == "Windows":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             # 配置Windows启动信息以隐藏命令行窗口
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
-        
+            popen_kwargs["startupinfo"] = startupinfo
+        else:
+            popen_kwargs["start_new_session"] = True
+
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=creationflags,
-            startupinfo=startupinfo,
             encoding='utf-8',
-            errors='replace'
+            errors='replace',
+            **popen_kwargs
         )
         
         # 保存进程引用到worker
@@ -1425,7 +1433,7 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
         logging.error(f"FFmpeg 启动失败: {e}")
         raise FFmpegUnavailableError(
             "随应用提供的 FFmpeg 无法启动。请重新解压完整便携包，"
-            "并确认安全软件未隔离 ffmpeg.exe；若持续失败，请向销售方重新获取应用包。"
+            "并确认 FFmpeg 二进制未被安全软件或系统策略移除；若持续失败，请向销售方重新获取应用包。"
         ) from e
 
 
