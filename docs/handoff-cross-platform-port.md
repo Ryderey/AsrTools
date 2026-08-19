@@ -3,7 +3,7 @@
 > 本文件由 2026-08-18 会话生成，供后续 Agent 直接执行，不必重新推导。
 > 关联历史评估：`.trellis/tasks/07-13-cross-platform-assessment/`（仍为 planning 状态，可作为背景参考）。
 >
-> **状态（2026-08-19 更新）**：本文档计划已在 `feature/cross-platform-port` 分支执行完毕（提交 a4f0c9c / c795f17 / 315631b，对应《跨平台适配查漏补缺》实施计划）。Linux 链已端到端实跑验证；Linux FFmpeg 固化为 BtbN `n8.1.2-44-g7c533d0f86`（经项目方确认的偏差，非精确 8.1.2 tag）；macOS 实机构建仍待 macOS 环境。以下内容为历史规划快照，勿重复执行。
+> **状态（2026-08-19 更新）**：本文档计划已在 `feature/cross-platform-port` 分支执行完毕（提交 a4f0c9c / c795f17 / 315631b，对应《跨平台适配查漏补缺》实施计划）。Linux 链已端到端实跑验证；Linux FFmpeg 固化为 BtbN `n8.1.2-44-g7c533d0f86`（经项目方确认的偏差，非精确 8.1.2 tag）；macOS 实机构建仍待 macOS 环境。后续追加：GitHub Actions 自动打包（`.github/workflows/build-release.yml`，Windows/Linux 双平台，手动或 v* tag 触发；macOS 因无 FFmpeg 8.1.2 定版源暂未纳入）。以下内容为历史规划快照，勿重复执行。
 
 ## 1. 决策（已由项目方确认）
 

@@ -1,0 +1,69 @@
+# 跨平台发布构建（Windows / Linux 本机构建，Nuitka 不支持交叉编译）。
+# macOS 暂未纳入：公开渠道无 FFmpeg 8.1.2 定版静态二进制（evermeet.cx 仅最新 9.x），
+# 待获得定版源并固化 FFMPEG_SHA256_BY_PLATFORM["Darwin"] 后再启用。
+name: Build Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Run unit tests
+        run: python -m unittest discover tests
+      - name: Create .python-version pin
+        # build_release.ps1 要求该文件；仓库中被 .gitignore 的 .* 规则忽略，CI 内现造。
+        run: Set-Content -Path .python-version -Value "3.12.13" -Encoding ascii
+      - name: Download FFmpeg 8.1.2 essentials (gyan.dev)
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip" -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg-dist
+          $exe = Get-ChildItem -Path ffmpeg-dist -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          "FFMPEG_PATH=$($exe.FullName)" >> $env:GITHUB_ENV
+      - name: Build release
+        # build_release.ps1 会校验 ffmpeg.exe 的固化 SHA-256 与版本，错配即失败。
+        run: ./build.bat "$env:FFMPEG_PATH"
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASRTools-Windows-x64-v1.1.0
+          path: dist/ASRTools-Windows-x64-v*/
+
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - name: Run unit tests
+        run: python -m unittest discover tests
+      - name: Install patchelf (Nuitka standalone dependency)
+        run: |
+          uv tool install patchelf
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Download pinned FFmpeg (BtbN n8.1.2-44 linux64 GPL)
+        # 与 app_runtime.FFMPEG_SHA256_BY_PLATFORM["Linux"] 固化值对应；
+        # build_release.py 会校验 SHA-256 与版本，源被替换或漂移即失败。
+        run: |
+          curl -fsSL -o ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-18-15-03/ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1.tar.xz"
+          tar xf ffmpeg.tar.xz
+          echo "FFMPEG_PATH=$PWD/ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1/bin/ffmpeg" >> "$GITHUB_ENV"
+      - name: Build release
+        run: python3 scripts/build_release.py --ffmpeg-path "$FFMPEG_PATH"
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ASRTools-Linux-x64-v1.1.0
+          path: dist/ASRTools-Linux-x64-v*/

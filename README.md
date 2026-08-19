@@ -127,6 +127,15 @@ python3 scripts/build_release.py --ffmpeg-path /path/to/ffmpeg
 
 发布后可用 `python3 scripts/validate_release.py --ffmpeg-path /path/to/ffmpeg`（Windows 为 `validate_release.ps1`）对打包产物做布局校验与冒烟检查，产出 `VALIDATION-REPORT.md`。
 
+### GitHub Actions 自动构建
+
+`.github/workflows/build-release.yml` 提供 Windows / Linux 双平台自动打包：
+
+- 触发方式：Actions 页面手动运行（workflow_dispatch）或推送 `v*` tag。
+- 每个平台先跑单测，再下载各自的定版 FFmpeg（Windows：gyan.dev 8.1.2 essentials；Linux：BtbN `n8.1.2-44` 固化哈希构建），构建脚本校验哈希与版本，错配即失败。
+- 产物上传为 Actions 工件（`ASRTools-Windows-x64-v*` / `ASRTools-Linux-x64-v*`）。
+- macOS 暂未纳入：公开渠道无 FFmpeg 8.1.2 定版静态二进制，待获得定版源并固化哈希后启用。
+
 便携包根目录固定为：
 
 ```text
