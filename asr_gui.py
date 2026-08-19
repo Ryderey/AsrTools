@@ -1363,6 +1363,14 @@ class MainWindow(FluentWindow):
             worker._terminate_ffmpeg()
         super().closeEvent(event)
 
+def convert_failure_message(stderr: str, returncode: int, input_file: str) -> str:
+    """把 FFmpeg 转换失败输出转成可操作的中文提示。"""
+    if "does not contain any stream" in stderr:
+        return f"输入文件 {input_file} 不含音频流，无法提取音频（纯视频文件）。"
+    detail = stderr.strip().splitlines()[-1] if stderr.strip() else f"退出码 {returncode}"
+    return f"{detail}。请检查输入文件是否完整且原目录可写。"
+
+
 def video2audio(input_file: str, output: str = "", worker=None) -> bool:
     """使用ffmpeg将视频转换为音频（支持取消）
     
@@ -1434,8 +1442,7 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
         
         if process.returncode == 0 and Path(output).is_file():
             return True
-        error_detail = stderr.strip().splitlines()[-1] if stderr.strip() else f"退出码 {process.returncode}"
-        raise RuntimeError(f"FFmpeg 转换失败：{error_detail}。请检查输入文件是否完整且原目录可写。")
+        raise RuntimeError(f"FFmpeg 转换失败：{convert_failure_message(stderr, process.returncode, input_file)}")
 
     except FFmpegUnavailableError:
         raise
