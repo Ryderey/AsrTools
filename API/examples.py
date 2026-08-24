@@ -5,7 +5,6 @@ AsrTools API 使用示例
 """
 
 import os
-from pathlib import Path
 from API.asr_api import ASRAPI, process_file, batch_process, process_directory
 
 
@@ -85,7 +84,7 @@ def example_custom_settings():
     # 创建自定义配置的API实例
     custom_api = ASRAPI(
         use_cache=False,      # 禁用缓存
-        max_workers=5         # 增加并发数
+        max_workers=3         # 最大并发数
     )
     
     if os.path.exists("test_video.mp4"):

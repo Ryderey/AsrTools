@@ -76,7 +76,11 @@ from API.asr_api import batch_process
 input_files = ["video1.mp4", "video2.mp4", "audio1.mp3"]
 results = batch_process(input_files, output_format="srt", output_dir="./subtitles")
 
-print(f"成功: {len(results['success'])}, 失败: {len(results['failed'])}")
+print(
+    f"成功: {len(results['success'])}, "
+    f"失败: {len(results['failed'])}, "
+    f"风控暂停: {len(results['paused'])}"
+)
 ```
 
 #### 目录处理
@@ -94,7 +98,7 @@ results = process_directory("./videos", output_format="txt", recursive=True)
 from API.asr_api import ASRAPI
 
 # 自定义配置
-api = ASRAPI(use_cache=True, max_workers=5)
+api = ASRAPI(use_cache=True, max_workers=3)
 
 # 处理文件
 result = api.process_file("input.mp4", output_format="ass", output_path="custom_output.ass")
@@ -118,8 +122,8 @@ python -m API.asr_api video.mp4 -f srt -o ./output
 # 目录处理 (递归)
 python -m API.asr_api ./videos -f txt -o ./subtitles --recursive
 
-# 禁用缓存，增加并发数
-python -m API.asr_api input.mp4 --no-cache --workers 5
+# 禁用缓存，使用最大并发数
+python -m API.asr_api input.mp4 --no-cache --workers 3
 ```
 
 ## 支持的格式
@@ -138,7 +142,7 @@ python -m API.asr_api input.mp4 --no-cache --workers 5
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `use_cache` | `True` | 启用缓存避免重复处理相同文件 |
-| `max_workers` | `3` | 最大并发线程数 |
+| `max_workers` | `3` | 并发线程数（1-3） |
 | `output_dir` | `None` | 自定义输出目录 |
 
 ## 示例脚本
@@ -157,12 +161,14 @@ API会自动处理以下情况：
 - 不支持的文件格式
 - 网络连接问题
 - API调用失败
+- 必剪接口风控或云端识别停滞
 
-所有错误都会记录到日志，并返回适当的错误信息。
+批量返回值包含 `success`、`failed` 和 `paused`。首次风控后会停止投放新任务，
+因风控或识别停滞而未完成的文件进入 `paused`，不会误报为文件失败。
 
 ## 性能优化建议
 
-1. **并发设置**: 根据网络带宽调整 `max_workers` (建议3-5)
+1. **并发设置**: `max_workers` 支持 1-3；批量任务会自动限制必剪接口请求频率
 2. **缓存启用**: 对于可能重复处理的文件，保持 `use_cache=True`
 3. **批量处理**: 尽量使用批量处理而不是逐个处理
 4. **输出目录**: 指定专门的输出目录避免文件混乱

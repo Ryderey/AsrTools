@@ -4,6 +4,7 @@ import os
 import zlib
 import tempfile
 import threading
+from typing import Union
 
 from .ASRData import ASRDataSeg, ASRData
 
@@ -13,11 +14,11 @@ class BaseASR:
     CACHE_FILE = os.path.join(tempfile.gettempdir(), "bk_asr", "asr_cache.json")
     _lock = threading.Lock()
 
-    def __init__(self, audio_path: [str, bytes], use_cache: bool = False):
+    def __init__(self, audio_path: Union[str, bytes], use_cache: bool = False):
         self.audio_path = audio_path
-        self.file_binary = None
+        self.file_binary = b""
 
-        self.crc32_hex = None
+        self.crc32_hex = ""
         self.use_cache = use_cache
 
         self._set_data()
@@ -43,13 +44,43 @@ class BaseASR:
         if not self.use_cache:
             return
         with self._lock:
+            temp_path = None
             try:
-                with open(self.CACHE_FILE, 'w', encoding='utf-8') as f:
+                cache_dir = os.path.dirname(self.CACHE_FILE) or "."
+                os.makedirs(cache_dir, exist_ok=True)
+
+                disk_cache = {}
+                if os.path.exists(self.CACHE_FILE):
+                    try:
+                        with open(self.CACHE_FILE, 'r', encoding='utf-8') as f:
+                            loaded_cache = json.load(f)
+                        if isinstance(loaded_cache, dict):
+                            disk_cache = loaded_cache
+                    except (json.JSONDecodeError, OSError):
+                        pass
+
+                disk_cache.update(self.cache)
+                self.cache = disk_cache
+                fd, temp_path = tempfile.mkstemp(
+                    prefix="asr_cache_", suffix=".tmp", dir=cache_dir
+                )
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
                     json.dump(self.cache, f, ensure_ascii=False, indent=2)
-                if os.path.exists(self.CACHE_FILE) and os.path.getsize(self.CACHE_FILE) > 10 * 1024 * 1024:
+                os.replace(temp_path, self.CACHE_FILE)
+                temp_path = None
+                if (
+                    os.path.exists(self.CACHE_FILE)
+                    and os.path.getsize(self.CACHE_FILE) > 10 * 1024 * 1024
+                ):
                     os.remove(self.CACHE_FILE)
-            except IOError as e:
+            except OSError as e:
                 logging.error(f"Failed to save cache: {e}")
+            finally:
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
 
     def _set_data(self):
         if isinstance(self.audio_path, bytes):
@@ -84,6 +115,3 @@ class BaseASR:
     def _run(self) -> dict:
         """ Run the ASR service and return the response data. """
         raise NotImplementedError("_run method must be implemented in subclass")
-
-
-

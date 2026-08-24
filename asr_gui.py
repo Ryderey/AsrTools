@@ -7,16 +7,16 @@ import platform
 import subprocess
 import sys
 import signal
-import tempfile
 import threading
 import time
+from typing import Any, ClassVar, Dict
 
 # FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH
 if platform.system() == "Windows":
     plugin_path = os.path.join(sys.prefix, 'Lib', 'site-packages', 'PyQt5', 'Qt5', 'plugins')
     os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = plugin_path
 
-from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, pyqtSignal as Signal, pyqtSlot as Slot, QSettings
+from PyQt5.QtCore import Qt, QRunnable, QThreadPool, QObject, QTimer, pyqtSignal as Signal, pyqtSlot as Slot, QSettings
 from PyQt5.QtGui import QCursor, QColor, QFont
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QFileDialog,
                              QTableWidgetItem, QHeaderView, QSizePolicy, QCheckBox, QSpinBox)
@@ -25,7 +25,14 @@ from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentI
                             FluentWindow, BodyLabel, MessageBox)
 
 from app_runtime import APP_VERSION, FFmpegUnavailableError, resolve_ffmpeg_path
-from bk_asr.BcutASR import BcutASR
+from bk_asr.BcutASR import BcutASR, BcutPollingTimeoutError, BcutRateLimitedError
+
+MIN_THREAD_COUNT = 1
+MAX_THREAD_COUNT = 3
+
+
+def clamp_thread_count(value):
+    return max(MIN_THREAD_COUNT, min(MAX_THREAD_COUNT, int(value)))
 
 # 设置日志配置
 logging.basicConfig(
@@ -36,7 +43,7 @@ logging.basicConfig(
 
 class WorkerSignals(QObject):
     finished = Signal(str, str)
-    errno = Signal(str, str)
+    errno = Signal(str, str, str, float)
     cancelled = Signal(str)  # 新增：任务被取消信号
 
 
@@ -44,7 +51,7 @@ class WorkerSignals(QObject):
 
 class ASRWorker(QRunnable):
     """ASR处理工作线程（支持强制终止和临时文件管理）"""
-    _workers = {}  # 类变量：跟踪所有活动的worker
+    _workers: ClassVar[Dict[str, "ASRWorker"]] = {}  # 跟踪所有活动的worker
     _lock = threading.Lock()
     
     def __init__(self, file_path, asr_engine, export_format, delete_temp_audio=False):
@@ -98,12 +105,17 @@ class ASRWorker(QRunnable):
                     )
                 else:
                     # Unix系统使用进程组终止
-                    os.killpg(os.getpgid(self._ffmpeg_process.pid), signal.SIGTERM)
+                    killpg = getattr(os, "killpg")
+                    getpgid = getattr(os, "getpgid")
+                    killpg(getpgid(self._ffmpeg_process.pid), signal.SIGTERM)
                     # 给进程一点时间优雅退出，然后强制终止
                     try:
                         self._ffmpeg_process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        os.killpg(os.getpgid(self._ffmpeg_process.pid), signal.SIGKILL)
+                        killpg(
+                            getpgid(self._ffmpeg_process.pid),
+                            getattr(signal, "SIGKILL"),
+                        )
                 logging.info(f"已终止ffmpeg进程: {self.file_path}")
             except Exception as e:
                 logging.warning(f"终止ffmpeg进程时出错: {e}")
@@ -197,7 +209,11 @@ class ASRWorker(QRunnable):
                 return
             
             # 使用B接口进行ASR识别
-            asr = BcutASR(self.audio_path, use_cache=use_cache)
+            asr = BcutASR(
+                self.audio_path,
+                use_cache=use_cache,
+                should_stop=self.is_cancelled,
+            )
 
             logging.info(f"开始处理文件: {self.file_path} 使用引擎: {self.asr_engine}")
             result = asr.run()
@@ -243,7 +259,21 @@ class ASRWorker(QRunnable):
                 # 处理失败时，根据用户设置决定是否清理
                 self.cleanup_temp_audio()
                 logging.error(f"处理文件 {self.file_path} 时出错: {str(e)}")
-                self.signals.errno.emit(self.file_path, f"处理时出错: {str(e)}")
+                if isinstance(e, BcutRateLimitedError):
+                    category = "rate_limited"
+                    retry_after = e.retry_after
+                elif isinstance(e, BcutPollingTimeoutError):
+                    category = "stalled"
+                    retry_after = 0.0
+                else:
+                    category = "error"
+                    retry_after = 0.0
+                self.signals.errno.emit(
+                    self.file_path,
+                    category,
+                    f"处理时出错: {str(e)}",
+                    retry_after,
+                )
 
 class ASRWidget(QWidget):
     """ASR处理界面"""
@@ -255,6 +285,15 @@ class ASRWidget(QWidget):
         self.thread_pool.setMaxThreadCount(self.max_threads)
         self.processing_queue = []
         self.workers = {}  # 维护文件路径到worker的映射（用于信号连接跟踪）
+        self.batch_state = "running"
+        self.probe_file = None
+        self.circuit_deadline = 0.0
+        self.cooldown_timer = QTimer(self)
+        self.cooldown_timer.setSingleShot(True)
+        self.cooldown_timer.timeout.connect(self.start_recovery_probe)
+        self.countdown_timer = QTimer(self)
+        self.countdown_timer.setInterval(1000)
+        self.countdown_timer.timeout.connect(self.update_circuit_notice)
 
         # 加载设置
         self.load_settings()
@@ -271,7 +310,8 @@ class ASRWidget(QWidget):
         self.delete_temp_audio_default = settings.value("delete_temp_audio", False, type=bool)
         self.max_threads = settings.value("max_threads", 3, type=int)
         # 确保线程数在有效范围内
-        self.max_threads = max(1, min(10, self.max_threads))
+        self.max_threads = clamp_thread_count(self.max_threads)
+        settings.setValue("max_threads", self.max_threads)
 
     def update_thread_pool(self):
         """更新线程池设置"""
@@ -303,6 +343,7 @@ class ASRWidget(QWidget):
             return False
         
         terminated = False
+        was_probe = self.batch_state == "probing" and file_path == self.probe_file
         
         # 1. 从队列中移除（如果存在）
         if file_path in self.processing_queue:
@@ -332,7 +373,17 @@ class ASRWidget(QWidget):
         
         # 4. 强制清理临时文件（用户手动操作时）
         self.force_cleanup_temp_audio(file_path)
-        
+
+        if was_probe:
+            if self.processing_queue:
+                self.enter_manual_pause(
+                    "恢复探测已取消，批次仍保持暂停。请稍后点击“继续处理”。"
+                )
+            else:
+                self.finish_probe()
+
+        self.process_next_in_queue()
+
         return terminated
     
     def force_cleanup_temp_audio(self, original_file_path):
@@ -407,11 +458,11 @@ class ASRWidget(QWidget):
         thread_label = BodyLabel("并发线程数:", self)
         thread_label.setFixedWidth(80)
         self.thread_spinbox = QSpinBox(self)
-        self.thread_spinbox.setMinimum(1)
-        self.thread_spinbox.setMaximum(10)
+        self.thread_spinbox.setMinimum(MIN_THREAD_COUNT)
+        self.thread_spinbox.setMaximum(MAX_THREAD_COUNT)
         self.thread_spinbox.setValue(self.max_threads)
         self.thread_spinbox.setFixedWidth(60)
-        self.thread_spinbox.setToolTip("设置同时处理的音频文件数量 (1-10)")
+        self.thread_spinbox.setToolTip("设置同时处理的音频文件数量 (1-3)")
         self.thread_spinbox.valueChanged.connect(self.on_thread_count_changed)
         thread_layout.addWidget(thread_label)
         thread_layout.addWidget(self.thread_spinbox)
@@ -493,6 +544,11 @@ class ASRWidget(QWidget):
         self.process_button.clicked.connect(self.process_files)
         self.process_button.setEnabled(False)  # 初始禁用
         layout.addWidget(self.process_button)
+
+        self.circuit_notice = BodyLabel("", self)
+        self.circuit_notice.setWordWrap(True)
+        self.circuit_notice.hide()
+        layout.addWidget(self.circuit_notice)
 
         self.setAcceptDrops(True)
 
@@ -579,7 +635,7 @@ class ASRWidget(QWidget):
             return
         
         # 如果任务正在处理中，显示确认对话框
-        if status_item and status_item.text() == "处理中":
+        if status_item and status_item.text() in ("处理中", "恢复探测"):
             w = MessageBox('确认删除', 
                           '该任务正在处理中，强制终止并删除吗？\n（将清理所有相关资源）',
                           self)
@@ -650,7 +706,7 @@ class ASRWidget(QWidget):
             return
             
         status = status_item.text()
-        if status == "处理中":
+        if status in ("处理中", "恢复探测"):
             # 如果正在处理中，询问是否强制终止
             w = MessageBox('确认重新处理', 
                           '该任务正在处理中，强制终止并重新处理吗？\n（将清理所有相关资源）',
@@ -694,11 +750,31 @@ class ASRWidget(QWidget):
 
     def add_to_queue(self, file_path):
         """将文件添加到处理队列并更新状态"""
-        self.processing_queue.append(file_path)
+        self.enqueue_file(file_path)
         self.process_next_in_queue()
+
+    def set_file_status(self, file_path, status, color="gray"):
+        row = self.find_row_by_file_path(file_path)
+        if row != -1 and 0 <= row < self.table.rowCount():
+            item = self.create_non_editable_item(status)
+            item.setForeground(QColor(color))
+            self.table.setItem(row, 2, item)
+
+    def enqueue_file(self, file_path, front=False):
+        if not file_path or file_path in self.processing_queue:
+            return
+        if front:
+            self.processing_queue.insert(0, file_path)
+        else:
+            self.processing_queue.append(file_path)
+        status = "风控暂停" if self.batch_state != "running" else "排队中"
+        self.set_file_status(file_path, status, "darkorange" if self.batch_state != "running" else "gray")
 
     def process_files(self):
         """处理所有未处理的文件"""
+        if self.batch_state == "manual_pause":
+            self.start_recovery_probe()
+            return
         for row in range(self.table.rowCount()):
             status_item = self.table.item(row, 2)
             filename_item = self.table.item(row, 1)
@@ -707,17 +783,19 @@ class ASRWidget(QWidget):
             if status_item.text() == "未处理":
                 file_path = filename_item.data(Qt.UserRole)
                 if file_path:
-                    self.processing_queue.append(file_path)
+                    self.enqueue_file(file_path)
         self.process_next_in_queue()
 
     def process_next_in_queue(self):
         """处理队列中的下一个文件"""
-        while self.thread_pool.activeThreadCount() < self.max_threads and self.processing_queue:
+        if self.batch_state != "running":
+            return
+        while len(self.workers) < self.max_threads and self.processing_queue:
             file_path = self.processing_queue.pop(0)
             if file_path not in self.workers:
                 self.process_file(file_path)
 
-    def process_file(self, file_path):
+    def process_file(self, file_path, is_probe=False):
         """处理单个文件"""
         if not file_path:
             return
@@ -734,15 +812,91 @@ class ASRWidget(QWidget):
 
         row = self.find_row_by_file_path(file_path)
         if row != -1 and 0 <= row < self.table.rowCount():
-            status_item = self.create_non_editable_item("处理中")
-            status_item.setForeground(QColor("orange"))
+            status = "恢复探测" if is_probe else "处理中"
+            status_item = self.create_non_editable_item(status)
+            status_item.setForeground(QColor("darkorange" if is_probe else "orange"))
             self.table.setItem(row, 2, status_item)
             self.update_start_button_state()
+
+    def mark_queue_paused(self):
+        for file_path in self.processing_queue:
+            self.set_file_status(file_path, "风控暂停", "darkorange")
+
+    def cancel_active_workers(self):
+        for file_path, worker in list(self.workers.items()):
+            self.set_file_status(file_path, "风控暂停", "darkorange")
+            worker.cancel()
+
+    def paused_task_count(self):
+        return sum(
+            1
+            for row in range(self.table.rowCount())
+            if self.table.item(row, 2) is not None
+            and self.table.item(row, 2).text() == "风控暂停"
+        )
+
+    def update_circuit_notice(self):
+        if self.batch_state != "cooldown":
+            return
+        remaining = max(0, int(self.circuit_deadline - time.monotonic() + 0.999))
+        self.circuit_notice.setText(
+            f"必剪接口触发风控，剩余 {self.paused_task_count()} 个任务已暂停。"
+            f"{remaining} 秒后尝试恢复。"
+        )
+        self.circuit_notice.show()
+
+    def open_batch_circuit(self, retry_after):
+        self.batch_state = "cooldown"
+        self.circuit_deadline = time.monotonic() + max(0.0, retry_after)
+        self.cancel_active_workers()
+        self.mark_queue_paused()
+        self.update_circuit_notice()
+        self.countdown_timer.start()
+        self.cooldown_timer.start(max(0, int(retry_after * 1000 + 0.999)))
+        self.update_start_button_state()
+
+    def start_recovery_probe(self):
+        if self.batch_state not in ("cooldown", "manual_pause"):
+            return
+        self.cooldown_timer.stop()
+        self.countdown_timer.stop()
+        if not self.processing_queue:
+            self.batch_state = "running"
+            self.circuit_notice.hide()
+            self.update_start_button_state()
+            return
+        self.batch_state = "probing"
+        self.probe_file = self.processing_queue.pop(0)
+        self.circuit_notice.setText("正在用一个任务探测必剪接口是否恢复…")
+        self.circuit_notice.show()
+        self.process_file(self.probe_file, is_probe=True)
+        self.update_start_button_state()
+
+    def enter_manual_pause(self, message):
+        self.batch_state = "manual_pause"
+        self.probe_file = None
+        self.cooldown_timer.stop()
+        self.countdown_timer.stop()
+        self.mark_queue_paused()
+        self.circuit_notice.setText(message)
+        self.circuit_notice.show()
+        self.update_start_button_state()
+
+    def finish_probe(self):
+        self.batch_state = "running"
+        self.probe_file = None
+        self.circuit_notice.hide()
+        for file_path in self.processing_queue:
+            self.set_file_status(file_path, "排队中", "gray")
     
     def handle_cancelled(self, file_path):
         """处理任务被取消的情况"""
+        was_probe = self.batch_state == "probing" and file_path == self.probe_file
+        batch_paused = self.batch_state in ("cooldown", "probing", "manual_pause")
         row = self.find_row_by_file_path(file_path)
-        if row != -1 and 0 <= row < self.table.rowCount():
+        if batch_paused:
+            self.enqueue_file(file_path, front=was_probe)
+        elif row != -1 and 0 <= row < self.table.rowCount():
             # 更新状态为"已取消"
             item_status = self.create_non_editable_item("已取消")
             item_status.setForeground(QColor("gray"))
@@ -751,7 +905,13 @@ class ASRWidget(QWidget):
         # 清理引用
         if file_path in self.workers:
             self.workers.pop(file_path, None)
-        
+
+        if was_probe:
+            self.enter_manual_pause(
+                "恢复探测已取消，批次仍保持暂停。请稍后点击“继续处理”。"
+            )
+            return
+
         # 继续处理队列
         self.process_next_in_queue()
         self.update_start_button_state()
@@ -778,11 +938,36 @@ class ASRWidget(QWidget):
 
         if file_path:
             self.workers.pop(file_path, None)
+        if self.batch_state == "probing" and file_path == self.probe_file:
+            self.finish_probe()
         self.process_next_in_queue()
         self.update_start_button_state()
 
-    def handle_error(self, file_path, error_message):
+    def handle_error(self, file_path, category, error_message, retry_after):
         """处理错误信息"""
+        self.workers.pop(file_path, None)
+        if category == "rate_limited":
+            was_probe = self.batch_state == "probing" and file_path == self.probe_file
+            self.enqueue_file(file_path, front=True)
+            if was_probe:
+                self.enter_manual_pause(
+                    "接口仍受限制，已停止自动重试。请稍后点击“继续处理”。"
+                )
+            elif self.batch_state == "running":
+                self.open_batch_circuit(retry_after)
+            else:
+                self.mark_queue_paused()
+                self.update_circuit_notice()
+            return
+
+        if category == "stalled":
+            self.enqueue_file(file_path, front=True)
+            self.cancel_active_workers()
+            self.enter_manual_pause(
+                "必剪云端识别长时间未完成，批次已暂停。请稍后点击“继续处理”。"
+            )
+            return
+
         row = self.find_row_by_file_path(file_path)
         if row != -1 and 0 <= row < self.table.rowCount():
             item_status = self.create_non_editable_item("错误")
@@ -799,8 +984,14 @@ class ASRWidget(QWidget):
                 parent=self
             )
 
-        if file_path:
-            self.workers.pop(file_path, None)
+        if self.batch_state == "probing" and file_path == self.probe_file:
+            if self.processing_queue:
+                self.enter_manual_pause(
+                    "恢复探测未成功，批次仍保持暂停。请稍后点击“继续处理”。"
+                )
+            else:
+                self.finish_probe()
+            return
         self.process_next_in_queue()
         self.update_start_button_state()
 
@@ -849,7 +1040,18 @@ class ASRWidget(QWidget):
                 break
         
         # 更新按钮状态
-        self.process_button.setEnabled(has_unprocessed)
+        if self.batch_state == "manual_pause":
+            self.process_button.setText("继续处理")
+            self.process_button.setEnabled(bool(self.processing_queue))
+        elif self.batch_state == "cooldown":
+            self.process_button.setText("风控冷却中")
+            self.process_button.setEnabled(False)
+        elif self.batch_state == "probing":
+            self.process_button.setText("恢复探测中")
+            self.process_button.setEnabled(False)
+        else:
+            self.process_button.setText("开始处理全部")
+            self.process_button.setEnabled(has_unprocessed)
         self.select_all_button.setEnabled(has_files)
         self.batch_process_button.setEnabled(has_selected)
         self.batch_reprocess_button.setEnabled(has_reprocessable)
@@ -936,7 +1138,7 @@ class ASRWidget(QWidget):
                 file_path = filename_item.data(Qt.UserRole)
                 if file_path:
                     selected_files.append(file_path)
-            elif status == "处理中":
+            elif status in ("处理中", "恢复探测"):
                 file_path = filename_item.data(Qt.UserRole)
                 if file_path:
                     InfoBar.warning(
@@ -962,7 +1164,7 @@ class ASRWidget(QWidget):
             return
         
         for file_path in selected_files:
-            self.processing_queue.append(file_path)
+            self.enqueue_file(file_path)
         self.process_next_in_queue()
 
     def get_selected_rows(self):
@@ -1015,7 +1217,7 @@ class ASRWidget(QWidget):
             status = status_item.text()
             if status in ["已处理", "错误", "已取消"]:
                 reprocessable_rows.append(row)
-            elif status == "处理中":
+            elif status in ("处理中", "恢复探测"):
                 processing_rows.append(row)
         
         total_count = len(reprocessable_rows) + len(processing_rows)
@@ -1067,7 +1269,7 @@ class ASRWidget(QWidget):
                 self.table.setItem(row, 2, new_status)
             
             # 添加到队列
-            self.processing_queue.append(file_path)
+            self.enqueue_file(file_path)
         
         # 6. 处理已完成的任务（断开连接并重新加入队列）
         for row in reprocessable_rows:
@@ -1098,7 +1300,7 @@ class ASRWidget(QWidget):
                 self.table.setItem(row, 2, new_status)
             
             # 添加到队列
-            self.processing_queue.append(file_path)
+            self.enqueue_file(file_path)
         
         # 7. 启动处理流程
         processed_count = len(reprocessable_rows) + len(processing_rows)
@@ -1142,7 +1344,7 @@ class ASRWidget(QWidget):
             if not (0 <= row < self.table.rowCount()):
                 continue
             status_item = self.table.item(row, 2)
-            if status_item and status_item.text() == "处理中":
+            if status_item and status_item.text() in ("处理中", "恢复探测"):
                 processing_count += 1
         
         confirm_msg = f'确定要删除 {len(selected_rows)} 个选中的任务吗？'
@@ -1305,11 +1507,12 @@ class GuideWidget(QWidget):
 
     def init_ui(self):
         guide_text = (
-            "1. 设置输出：选择 SRT、TXT 或 ASS；并发数可设为 1–10。\n"
+            "1. 设置输出：选择 SRT、TXT 或 ASS；并发数可设为 1–3。\n"
             "   视频等输入会生成同目录临时 MP3，可按需开启自动清理。\n\n"
             "2. 添加媒体：点击“选择文件”，或把媒体文件、文件夹拖入窗口。\n\n"
             "3. 开始处理：可处理全部任务，也可勾选后批量处理。\n"
             "   需要中止时可删除正在处理的任务；使用“重新处理”重试。\n\n"
+            "   如果接口触发风控，剩余任务会暂停；自动探测仍失败后可稍后点击“继续处理”。\n\n"
             "4. 获取结果：结果保存在原媒体目录，文件名不变，仅替换扩展名。\n"
             "   识别过程需要联网访问 B 站相关服务，且原目录必须可写。"
         )
@@ -1384,9 +1587,9 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
         return False
     
     # 创建output目录
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output = str(output)
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output = str(output_path)
 
     ffmpeg_path = resolve_ffmpeg_path()
     cmd = [
@@ -1402,7 +1605,7 @@ def video2audio(input_file: str, output: str = "", worker=None) -> bool:
     try:
         # Windows使用CREATE_NEW_PROCESS_GROUP以便能够终止进程树；
         # POSIX使用start_new_session隔离进程组，避免取消任务时连带终止整个应用
-        popen_kwargs = {}
+        popen_kwargs: Dict[str, Any] = {}
         if platform.system() == "Windows":
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             # 配置Windows启动信息以隐藏命令行窗口
