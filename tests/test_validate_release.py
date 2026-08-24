@@ -1,8 +1,9 @@
 import importlib.util
-from pathlib import Path
+import os
 import stat
-from tempfile import TemporaryDirectory
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import zipfile
 
 
@@ -42,7 +43,8 @@ class SafeExtractZipTests(unittest.TestCase):
                 validate_release.safe_extract_zip(archive, destination)
             extracted = destination / "ASRTools"
             self.assertTrue(extracted.is_file())
-            self.assertTrue(extracted.stat().st_mode & stat.S_IXUSR)
+            if os.name != "nt":
+                self.assertTrue(extracted.stat().st_mode & stat.S_IXUSR)
 
 
 if __name__ == "__main__":
