@@ -1,0 +1,13 @@
+# Experimental CPU alignment environment only; not the production release lock.
+# Install torch/torchaudio from manually downloaded wheels in build/offline-wheels.
+torch==2.6.0+cpu
+torchaudio==2.6.0+cpu
+funasr==1.2.6
+numpy==2.2.6
+librosa==0.11.0
+scipy==1.15.3
+numba==0.61.2
+llvmlite==0.44.0
+psutil==7.0.0
+sherpa-onnx==1.13.7
+sherpa-onnx-core==1.13.7

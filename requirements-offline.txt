@@ -1,0 +1,10 @@
+# Source integration environment, not the Windows distribution release lock.
+# CPU torch wheels/models are supplied manually. Reuse the tested runtime snapshot.
+-r requirements-alignment-probe.lock
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.2
+PyQt5-sip==12.18.0
+PyQt-Fluent-Widgets==1.11.2
+PyQt5-Frameless-Window==0.8.1
+darkdetect==0.8.0
+pywin32==312; sys_platform == 'win32'

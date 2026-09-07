@@ -27,6 +27,7 @@ from bk_asr.BcutASR import (
     BcutPollingTimeoutError,
     BcutRateLimitedError,
 )
+from bk_asr.OfflineASR import OfflineASR, atomic_text
 
 
 MIN_WORKERS = 1
@@ -36,7 +37,8 @@ MAX_WORKERS = 3
 class ASRAPI:
     """AsrTools语音识别API主类"""
     
-    def __init__(self, use_cache: bool = True, max_workers: int = 3):
+    def __init__(self, use_cache: bool = True, max_workers: int = 3,
+                 engine: str = "offline", model_dir=None, ffmpeg_path=None):
         """
         初始化ASR API
         
@@ -51,6 +53,10 @@ class ASRAPI:
             raise ValueError("max_workers 必须在 1 到 3 之间")
         self.use_cache = use_cache
         self.max_workers = max_workers
+        if engine not in ("offline", "bcut"):
+            raise ValueError("engine 必须为 offline 或 bcut")
+        self.engine = engine
+        self.offline = OfflineASR(model_dir=model_dir, ffmpeg_path=ffmpeg_path) if engine == "offline" else None
         self._setup_logging()
     
     def _setup_logging(self):
@@ -70,6 +76,8 @@ class ASRAPI:
         output_format: str = 'srt',
         output_path: Optional[str] = None,
         _propagate_pause: bool = False,
+        should_stop=lambda: False,
+        progress=lambda stage, current, total: None,
     ) -> Optional[str]:
         """
         处理单个音视频文件
@@ -83,32 +91,31 @@ class ASRAPI:
             str: 输出文件路径，失败返回None
         """
         try:
+            if output_format not in ("srt", "txt", "ass"):
+                raise ValueError(f"不支持的输出格式: {output_format}")
+            if output_path is not None and Path(output_path).resolve() == Path(input_path).resolve():
+                raise ValueError("字幕输出路径不能覆盖输入音视频")
             # 验证输入文件
             if not os.path.exists(input_path):
                 self.logger.error(f"输入文件不存在: {input_path}")
                 return None
             
             # 创建ASR实例
-            asr = BcutASR(input_path, use_cache=self.use_cache)
-            
-            # 执行语音识别
             self.logger.info(f"开始处理: {input_path}")
-            result = asr.run()
+            if self.engine == "offline":
+                result = self.offline.transcribe(input_path, use_cache=self.use_cache,
+                                                should_stop=should_stop, progress=progress)
+            else:
+                result = BcutASR(input_path, use_cache=self.use_cache, should_stop=should_stop).run()
             
             # 确定输出路径
             if output_path is None:
                 output_path = f"{os.path.splitext(input_path)[0]}.{output_format}"
             
             # 保存结果
-            if output_format == 'srt':
-                result.to_srt(output_path)
-            elif output_format == 'txt':
-                with open(output_path, 'w', encoding='utf-8') as f:
-                    f.write(result.to_txt())
-            elif output_format == 'ass':
-                result.to_ass(save_path=output_path)
-            else:
-                raise ValueError(f"不支持的输出格式: {output_format}")
+            progress("导出字幕", 0, 0)
+            text = {"srt": result.to_srt, "txt": result.to_txt, "ass": result.to_ass}[output_format]()
+            atomic_text(output_path, text, should_stop)
             
             self.logger.info(f"处理完成: {output_path}")
             return output_path
@@ -149,12 +156,13 @@ class ASRAPI:
         next_index = 0
         paused = False
         
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        effective_workers = 1 if self.engine == "offline" else self.max_workers
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
             futures: Dict[Future, int] = {}
 
             def submit_available():
                 nonlocal next_index
-                while not paused and len(futures) < self.max_workers and next_index < len(input_paths):
+                while not paused and len(futures) < effective_workers and next_index < len(input_paths):
                     index = next_index
                     next_index += 1
                     future = executor.submit(
@@ -369,6 +377,8 @@ if __name__ == "__main__":
                        help="递归处理子目录")
     parser.add_argument("--no-cache", action="store_true", 
                        help="禁用缓存")
+    parser.add_argument("--engine", choices=["offline", "bcut"], default="offline", help="默认本地离线；bcut 会上传音频")
+    parser.add_argument("--models", help="本地模型目录")
     parser.add_argument(
         "--workers",
         type=int,
@@ -382,7 +392,7 @@ if __name__ == "__main__":
     # 创建API实例
     api = ASRAPI(
         use_cache=not args.no_cache,
-        max_workers=args.workers
+        max_workers=args.workers, engine=args.engine, model_dir=args.models
     )
     
     # 判断输入是文件还是目录

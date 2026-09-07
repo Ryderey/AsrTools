@@ -57,6 +57,7 @@ BUILD_WITH_NUITKA.md
 generate_icon.py
 
 # Audio/Video processing cache
+/models/
 bk_asr/asr_cache.json
 temp/
 tmp/

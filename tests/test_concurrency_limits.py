@@ -47,7 +47,7 @@ class APIConcurrencyLimitTests(unittest.TestCase):
         self.assertIn("invalid choice", result.stderr)
 
     def test_batch_stops_bounded_submission_and_reports_paused_inputs(self):
-        api = ASRAPI(max_workers=3)
+        api = ASRAPI(max_workers=3, engine="bcut")
         barrier = threading.Barrier(3)
         limited = threading.Event()
         calls = []
@@ -76,7 +76,7 @@ class APIConcurrencyLimitTests(unittest.TestCase):
         self.assertEqual(results["paused"], [inputs[0], *inputs[3:]])
 
     def test_single_worker_batch_stops_after_first_rate_limit(self):
-        api = ASRAPI(max_workers=1)
+        api = ASRAPI(max_workers=1, engine="bcut")
         inputs = [f"input-{index}.mp3" for index in range(5)]
         api._process_single_with_output = Mock(
             side_effect=BcutRateLimitedError(30)
@@ -90,7 +90,7 @@ class APIConcurrencyLimitTests(unittest.TestCase):
         self.assertEqual(results["paused"], inputs)
 
     def test_single_file_api_keeps_none_on_rate_limit(self):
-        api = ASRAPI()
+        api = ASRAPI(engine="bcut")
         with patch("API.asr_api.os.path.exists", return_value=True), patch(
             "API.asr_api.BcutASR"
         ) as asr_class:

@@ -121,7 +121,8 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
     )
 }
 Invoke-Checked -FilePath $UvCommand.Source -Arguments @(
-    "pip", "sync", "--python", $VenvPython, "--require-hashes", $LockFile
+    "pip", "sync", "--python", $VenvPython, "--require-hashes",
+    "--offline", "--find-links", (Join-Path $RepoRoot "build\offline-wheels"), $LockFile
 )
 
 $ContractValues = @(& $VenvPython -c "from app_runtime import APP_VERSION, WINDOWS_FILE_VERSION, FFMPEG_VERSION, FFMPEG_SHA256; print(APP_VERSION); print(WINDOWS_FILE_VERSION); print(FFMPEG_VERSION); print(FFMPEG_SHA256)")
@@ -266,6 +267,9 @@ $SourceItems = @(
     "release-assets",
     "requirements-release.in",
     "requirements-release.lock",
+    "requirements-offline.txt",
+    "requirements-alignment-probe.lock",
+    "docs",
     "requirements.txt",
     "resources",
     "scripts",

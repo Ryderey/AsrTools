@@ -9,7 +9,13 @@ import sys
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ClassVar, Dict
+from bk_asr.offline_alignment import prepare_native_runtime
+
+# On Windows the installed Qt/sentencepiece combination is load-order sensitive.
+# Only preload the small extension, not torch/FunASR or model weights on the UI thread.
+prepare_native_runtime()
 
 # FIX: 修复中文路径报错 https://github.com/WEIFENG2333/AsrTools/issues/18  设置QT_QPA_PLATFORM_PLUGIN_PATH
 if platform.system() == "Windows":
@@ -26,6 +32,7 @@ from qfluentwidgets import (ComboBox, PushButton, LineEdit, TableWidget, FluentI
 
 from app_runtime import APP_VERSION, FFmpegUnavailableError, resolve_ffmpeg_path
 from bk_asr.BcutASR import BcutASR, BcutPollingTimeoutError, BcutRateLimitedError
+from bk_asr.OfflineASR import OfflineASR, OFFLINE_ENGINE, ONLINE_ENGINE, atomic_text
 
 MIN_THREAD_COUNT = 1
 MAX_THREAD_COUNT = 3
@@ -45,6 +52,7 @@ class WorkerSignals(QObject):
     finished = Signal(str, str)
     errno = Signal(str, str, str, float)
     cancelled = Signal(str)  # 新增：任务被取消信号
+    progress = Signal(str, str, float, float)
 
 
 
@@ -54,10 +62,11 @@ class ASRWorker(QRunnable):
     _workers: ClassVar[Dict[str, "ASRWorker"]] = {}  # 跟踪所有活动的worker
     _lock = threading.Lock()
     
-    def __init__(self, file_path, asr_engine, export_format, delete_temp_audio=False):
+    def __init__(self, file_path, asr_engine, export_format, delete_temp_audio=False, offline_engine=None):
         super().__init__()
         self.file_path = file_path
         self.asr_engine = asr_engine
+        self.offline_engine = offline_engine
         self.export_format = export_format
         self.delete_temp_audio = delete_temp_audio  # 是否自动删除临时音频文件
         self.signals = WorkerSignals()
@@ -67,6 +76,7 @@ class ASRWorker(QRunnable):
         self._is_cancelled = False
         self._cancel_lock = threading.Lock()
         self._ffmpeg_process = None
+        self._offline_stage = None
         
         # 注册到活动worker字典
         with ASRWorker._lock:
@@ -164,10 +174,11 @@ class ASRWorker(QRunnable):
             return ASRWorker._workers.get(file_path)
     
     @staticmethod
-    def remove_worker(file_path):
+    def remove_worker(file_path, worker=None):
         """从活动worker字典中移除"""
         with ASRWorker._lock:
-            ASRWorker._workers.pop(file_path, None)
+            if worker is None or ASRWorker._workers.get(file_path) is worker:
+                ASRWorker._workers.pop(file_path, None)
     
     @Slot()
     def run(self):
@@ -179,6 +190,21 @@ class ASRWorker(QRunnable):
                 self.signals.cancelled.emit(self.file_path)
                 return
             
+            if self.asr_engine == OFFLINE_ENGINE:
+                try:
+                    if self.offline_engine is None:
+                        raise RuntimeError("离线模型管理器未初始化")
+                    result = self.offline_engine.transcribe(
+                        self.file_path, should_stop=self.is_cancelled,
+                        progress=self.report_offline_stage)
+                    result_text = {"SRT": result.to_srt, "TXT": result.to_txt, "ASS": result.to_ass}[self.export_format]()
+                    atomic_text(Path(self.file_path).with_suffix('.' + self.export_format.lower()), result_text, self.is_cancelled)
+                    self.signals.finished.emit(self.file_path, result_text)
+                finally:
+                    ASRWorker.remove_worker(self.file_path, self)
+                return
+            if self.asr_engine != ONLINE_ENGINE:
+                raise ValueError("未知识别引擎")
             use_cache = True
             
             # 检查文件类型,如果不是音频则转换
@@ -243,13 +269,13 @@ class ASRWorker(QRunnable):
             self.cleanup_temp_audio()
             
             # 从活动worker中移除
-            ASRWorker.remove_worker(self.file_path)
+            ASRWorker.remove_worker(self.file_path, self)
             
             self.signals.finished.emit(self.file_path, result_text)
             
         except Exception as e:
             # 从活动worker中移除
-            ASRWorker.remove_worker(self.file_path)
+            ASRWorker.remove_worker(self.file_path, self)
             
             if self.is_cancelled():
                 # 用户取消时，强制删除临时文件
@@ -275,6 +301,15 @@ class ASRWorker(QRunnable):
                     retry_after,
                 )
 
+    def report_offline_stage(self, stage, current, total):
+        # Filter in the worker before crossing threads: no per-segment/percentage
+        # updates or repeated UI repaints during recognition and alignment.
+        if stage in ("扫描音频", "识别中", "逐字对齐"):
+            stage = "识别中"
+        if stage != self._offline_stage:
+            self._offline_stage = stage
+            self.signals.progress.emit(self.file_path, stage, 0, 0)
+
 class ASRWidget(QWidget):
     """ASR处理界面"""
 
@@ -285,6 +320,10 @@ class ASRWidget(QWidget):
         self.thread_pool.setMaxThreadCount(self.max_threads)
         self.processing_queue = []
         self.workers = {}  # 维护文件路径到worker的映射（用于信号连接跟踪）
+        self.offline_engine = OfflineASR()
+        # Native CPU inference must run on a persistent Python-owned thread.
+        # Observed Windows heap corruption after native inference on Qt workers.
+        self.offline_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="offline-asr")
         self.batch_state = "running"
         self.probe_file = None
         self.circuit_deadline = 0.0
@@ -328,6 +367,14 @@ class ASRWidget(QWidget):
         self.max_threads = value
         self.update_thread_pool()
         self.save_settings()
+
+    def on_engine_changed(self, text):
+        online = text == ONLINE_ENGINE
+        self.thread_spinbox.blockSignals(True)
+        self.thread_spinbox.setValue(self.max_threads if online else 1)
+        self.thread_spinbox.blockSignals(False)
+        self.thread_spinbox.setEnabled(online)
+        self.thread_pool.setMaxThreadCount(self.max_threads if online else 1)
     
     def _terminate_and_cleanup_task(self, file_path, status_item=None):
         """终止任务并清理资源（用户手动操作时使用）
@@ -372,7 +419,8 @@ class ASRWidget(QWidget):
             self.workers.pop(file_path, None)
         
         # 4. 强制清理临时文件（用户手动操作时）
-        self.force_cleanup_temp_audio(file_path)
+        if self.combo_box.currentText() != OFFLINE_ENGINE:
+            self.force_cleanup_temp_audio(file_path)
 
         if was_probe:
             if self.processing_queue:
@@ -428,7 +476,7 @@ class ASRWidget(QWidget):
         engine_label = BodyLabel("选择接口:", self)
         engine_label.setFixedWidth(70)
         self.combo_box = ComboBox(self)
-        self.combo_box.addItems(['B 接口'])
+        self.combo_box.addItems([OFFLINE_ENGINE, ONLINE_ENGINE])
         engine_layout.addWidget(engine_label)
         engine_layout.addWidget(self.combo_box)
         layout.addLayout(engine_layout)
@@ -464,6 +512,10 @@ class ASRWidget(QWidget):
         self.thread_spinbox.setFixedWidth(60)
         self.thread_spinbox.setToolTip("设置同时处理的音频文件数量 (1-3)")
         self.thread_spinbox.valueChanged.connect(self.on_thread_count_changed)
+        self.thread_spinbox.setEnabled(False)
+        self.thread_spinbox.setToolTip("离线模式逐文件处理并复用模型；并发设置仅用于 B 接口")
+        self.combo_box.currentTextChanged.connect(self.on_engine_changed)
+        self.on_engine_changed(self.combo_box.currentText())
         thread_layout.addWidget(thread_label)
         thread_layout.addWidget(self.thread_spinbox)
         thread_layout.addStretch()
@@ -790,7 +842,8 @@ class ASRWidget(QWidget):
         """处理队列中的下一个文件"""
         if self.batch_state != "running":
             return
-        while len(self.workers) < self.max_threads and self.processing_queue:
+        effective_threads = 1 if self.combo_box.currentText() == OFFLINE_ENGINE else self.max_threads
+        while len(self.workers) < effective_threads and self.processing_queue:
             file_path = self.processing_queue.pop(0)
             if file_path not in self.workers:
                 self.process_file(file_path)
@@ -804,11 +857,16 @@ class ASRWidget(QWidget):
         selected_format = self.format_combo.currentText()
         delete_temp = self.delete_temp_checkbox.isChecked()
         worker = ASRWorker(file_path, selected_engine, selected_format, delete_temp_audio=delete_temp)
+        worker.offline_engine = self.offline_engine
         worker.signals.finished.connect(self.update_table)
         worker.signals.errno.connect(self.handle_error)
         worker.signals.cancelled.connect(self.handle_cancelled)
-        self.thread_pool.start(worker)
+        worker.signals.progress.connect(self.handle_progress)
         self.workers[file_path] = worker
+        if selected_engine == OFFLINE_ENGINE:
+            self.offline_executor.submit(worker.run)
+        else:
+            self.thread_pool.start(worker)
 
         row = self.find_row_by_file_path(file_path)
         if row != -1 and 0 <= row < self.table.rowCount():
@@ -817,6 +875,25 @@ class ASRWidget(QWidget):
             status_item.setForeground(QColor("darkorange" if is_probe else "orange"))
             self.table.setItem(row, 2, status_item)
             self.update_start_button_state()
+
+    def handle_progress(self, file_path, stage, current, total):
+        if file_path not in self.workers:
+            return
+        worker = self.workers[file_path]
+        if self.sender() is not None and self.sender() is not worker.signals:
+            return
+        if worker.is_cancelled():
+            self.set_file_status(file_path, "取消中", "gray")
+            return
+        # Preserve the established state text used by queue/context-menu handlers.
+        row = self.find_row_by_file_path(file_path)
+        if row >= 0:
+            item = self.table.item(row, 2)
+            if item is not None:
+                item.setText("处理中")
+                item.setToolTip(stage)
+                self.circuit_notice.setText(f"{Path(file_path).name}：{stage}，排队 {len(self.processing_queue)} 个")
+                self.circuit_notice.show()
 
     def mark_queue_paused(self):
         for file_path in self.processing_queue:
@@ -1006,6 +1083,10 @@ class ASRWidget(QWidget):
         return -1
 
     def update_start_button_state(self):
+        busy = bool(self.workers or self.processing_queue)
+        self.combo_box.setEnabled(not busy)
+        if not busy and self.batch_state == "running":
+            self.circuit_notice.hide()
         """根据文件列表更新按钮的状态"""
         has_files = self.table.rowCount() > 0
         
@@ -1563,7 +1644,8 @@ class MainWindow(FluentWindow):
         with ASRWorker._lock:
             workers = list(ASRWorker._workers.values())
         for worker in workers:
-            worker._terminate_ffmpeg()
+            worker.cancel()
+        self.asr_widget.offline_executor.shutdown(wait=True)
         super().closeEvent(event)
 
 def convert_failure_message(stderr: str, returncode: int, input_file: str) -> str:
@@ -1666,11 +1748,12 @@ def run_release_check(arguments: list[str]) -> int | None:
     parser = argparse.ArgumentParser(description="ASRTools release verification")
     parser.add_argument(
         "--release-check",
-        choices=("ffmpeg", "convert", "recognize", "workflow"),
+        choices=("ffmpeg", "convert", "recognize", "workflow", "offline-workflow"),
         required=True,
     )
     parser.add_argument("--input")
     parser.add_argument("--output")
+    parser.add_argument("--models", help="Local model directory for offline-workflow")
     parser.add_argument("--report", required=True)
     options = parser.parse_args(arguments)
 
@@ -1731,6 +1814,15 @@ def run_release_check(arguments: list[str]) -> int | None:
                 raise ValueError("workflow 检查需要 --input")
             application = QApplication.instance() or QApplication([])
             widget = ASRWidget()
+            offline_check = options.release_check == "offline-workflow"
+            widget.combo_box.setCurrentText(OFFLINE_ENGINE if offline_check else ONLINE_ENGINE)
+            if offline_check:
+                # An isolated cache proves this candidate can actually load and run
+                # its native dependencies, rather than return a prior source result.
+                widget.offline_engine = OfflineASR(
+                    model_dir=options.models,
+                    cache_dir=report_path.parent / "offline-check-cache",
+                )
             widget.format_combo.setCurrentText("SRT")
             widget.add_file_to_table(options.input)
             widget.process_files()
@@ -1760,6 +1852,7 @@ def run_release_check(arguments: list[str]) -> int | None:
                 output=str(output_path),
                 output_bytes=output_path.stat().st_size,
                 task_status=task_status,
+                engine=OFFLINE_ENGINE if offline_check else ONLINE_ENGINE,
             )
             widget.close()
         exit_code = 0
