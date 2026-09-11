@@ -3,13 +3,16 @@
 
 基于原项目：https://github.com/WEIFENG2333/AsrTools 进行修改，使用更方便
 
+当前离线分支的 Windows 完整交付包：双击根目录 `build.bat`，在独立后台进程中打包程序、运行库、FFmpeg 和离线模型。日志与完成状态见 `build/background/latest.txt` 指向的目录。
+准备条件、参数、输出位置及交付说明见 [Windows 一键打包与交付](docs/windows-delivery.md)。本期运行验证由交付方手动完成。
+
 ## 📖 项目简介
 
-ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具。v1.1.0 正式支持 Windows 10 及以上 x64、macOS 11 及以上、Linux x64，提供 B 接口批量识别与 SRT、TXT、ASS 导出。各平台交付包均由各平台本机构建（Nuitka 不支持交叉编译），并附原生构建与冒烟测试证据。
+ASRTools 是一款基于 PyQt5 开发的语音识别 GUI 工具。当前 v1.2.0 离线分支优先交付 Windows 10 及以上 x64，默认使用本地 CPU 识别，保留手动 B 接口及 SRT、TXT、ASS 导出。下方 Linux/macOS 说明保留为历史参考，不属于本期交付范围。
 
 ## ✨ 主要优化点
 
-1. **界面简化**：界面上仅保留 B 接口（BcutASR），操作更直观
+1. **本地优先**：默认离线识别，保留手动 B 接口（BcutASR）
 2. **交互增强**：增加多种交互选项，提升用户体验
    - 支持批量音频文件处理
    - 支持多种导出格式（SRT、TXT、ASS）
@@ -109,27 +112,30 @@ Linux 需要桌面环境提供的 xcb 库（一般发行版默认已有）；源
 
 ### 一键打包
 
-**Windows**：项目提供可失败、可复现的发布脚本；FFmpeg 路径必须显式传入：
+**Windows**：双击 `build.bat`，或在项目目录执行：
 
 ```bash
-build.bat "D:\path\to\ffmpeg.exe"
+build.bat
 ```
 
-**macOS / Linux**：使用 Python 版发布脚本（阶段与 Windows 链对齐）：
+默认使用 `models/` 和 `build/ffmpeg-build-input/bin/ffmpeg.exe`；也可用 `build.bat "D:\path\to\ffmpeg.exe"` 指定 FFmpeg。
+完整参数和准备条件见 [build.bat 使用说明](docs/windows-delivery.md)。
+
+**macOS / Linux（历史流程，本期不交付）**：
 
 ```bash
 python3 scripts/build_release.py --ffmpeg-path /path/to/ffmpeg
 ```
 
-打包完成后，Windows 应用包位于 `dist/ASRTools-Windows-x64-v1.1.0/ASRTools-Windows-x64-v1.1.0-portable.zip`；macOS/Linux 应用包位于 `dist/ASRTools-<平台>-v1.1.0/` 下对应的 `.zip`。
+打包完成后，Windows 完整包位于 `dist/ASRTools-Windows-x64-v1.2.0/<构建时间>/ASRTools-Windows-x64-v1.2.0-portable.zip`。版本由 `app_runtime.py` 决定，旧交付目录保留。
 
-发布脚本会校验 FFmpeg 版本和哈希、同步 `requirements-release.lock`、构建 standalone 运行时和轻量根启动器，并组装许可证、源码包、构建清单和 `SHA256SUMS.txt`。缺少或错用 FFmpeg 时立即失败。
+发布脚本会校验 FFmpeg 和模型、核对已准备环境的锁定版本（或离线创建发布环境）、构建 standalone 运行时和轻量根启动器，并收集离线模型、许可证、源码包、构建清单和 `SHA256SUMS.txt`。
 
-发布后可用 `python3 scripts/validate_release.py --ffmpeg-path /path/to/ffmpeg`（Windows 为 `validate_release.ps1`）对打包产物做布局校验与冒烟检查，产出 `VALIDATION-REPORT.md`。
+本期打包不运行应用或功能测试，`VALIDATION-REPORT.md` 标记为待人工验证，交付方解压后自行验证。
 
 ### GitHub Actions 自动构建
 
-`.github/workflows/build-release.yml` 提供 Windows / Linux 双平台自动打包：
+历史 `.github/workflows/build-release.yml` 提供 Windows / Linux 自动打包，但尚未适配本期手动模型输入和完整离线交付；本期使用本地 `build.bat`。历史流程如下：
 
 - 触发方式：Actions 页面手动运行（workflow_dispatch）或推送 `v*` tag。
 - 每个平台先跑单测，再下载各自的定版 FFmpeg（Windows：gyan.dev 8.1.2 essentials；Linux：BtbN `n8.1.2-44` 固化哈希构建），构建脚本校验哈希与版本，错配即失败。

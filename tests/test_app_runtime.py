@@ -22,7 +22,7 @@ LINUX_SHA256 = "7E9CBECF3D568A411789EC73F6A28EABE4D37F6D2965B76CBD28AE98F018BA11
 
 class AppRuntimeTests(unittest.TestCase):
     def test_release_identity_is_consistent(self):
-        self.assertEqual(APP_VERSION, "1.1.0")
+        self.assertEqual(APP_VERSION, "1.2.0")
         self.assertEqual(WINDOWS_FILE_VERSION, f"{APP_VERSION}.0")
         self.assertEqual(FFMPEG_VERSION, "8.1.2")
         self.assertEqual(FFMPEG_SHA256_BY_PLATFORM["Windows"], WINDOWS_SHA256)

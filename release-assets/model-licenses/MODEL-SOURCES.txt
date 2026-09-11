@@ -1,0 +1,23 @@
+Model sources and retained notices (collected 2026-09-07)
+
+SenseVoice Small INT8: FunAudioLLM / Alibaba; ONNX release by k2-fsa sherpa-onnx.
+https://github.com/FunAudioLLM/SenseVoice
+https://github.com/k2-fsa/sherpa-onnx/releases/tag/asr-models
+Archive: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+The supplied LICENSE and README are retained under sensevoice-small-int8/.
+
+fa-zh: Alibaba / FunASR.
+https://huggingface.co/funasr/fa-zh/tree/d7701644d6e336f093501241beca010519c0986f
+The supplied model card is retained under fa-zh/README.md.
+It declares model-license and refers to the FunASR repository.
+The upstream English model agreement is retained in FunASR-MODEL-LICENSE.txt:
+https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE
+The package code license and model weight license are distinct.
+
+Silero VAD: Silero Team.
+https://github.com/snakers4/silero-vad
+https://github.com/snakers4/silero-vad/blob/master/LICENSE
+MIT license text is retained in Silero-LICENSE.txt.
+ONNX file supplied from the sherpa-onnx asr-models release.
+
+Exact bundled model/configuration hashes: ../../MODEL-CHECKSUMS.txt

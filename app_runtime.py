@@ -6,7 +6,7 @@ from pathlib import Path
 import platform
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 WINDOWS_FILE_VERSION = f"{APP_VERSION}.0"
 SUPPORTED_PLATFORM = {
     "Windows": "Windows 10+ x64",

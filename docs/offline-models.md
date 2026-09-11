@@ -31,9 +31,10 @@ models/
     silero_vad.onnx
 ```
 
-Models are ignored by Git and distributed separately. The application has not
-yet been integrated with these files. No automatic downloads or online fallback
-are allowed for the planned offline engine.
+Models are ignored by Git but included in the Windows full portable ZIP under
+`_runtime/models`. The default local engine loads these bundled files directly.
+See [Windows delivery](windows-delivery.md). No automatic model downloads or
+online fallback are performed.
 
 ## Input checksums
 

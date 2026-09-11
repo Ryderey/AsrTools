@@ -6,10 +6,12 @@
 - [ ] 360 与 Microsoft Defender 均未查杀或隔离便携 ZIP 及其解压内容。
 - [ ] 若出现 SmartScreen，可通过“更多信息 → 仍要运行”继续；不存在无法绕过的组织策略阻止。
 - [ ] 解压后的根目录仅包含 `ASRTools.exe`、`README-Windows.txt`、`_runtime` 和 `docs`。
+- [ ] `_runtime/models` 包含 `sensevoice-small-int8`、`silero-vad`、`fa-zh`；按 `docs/MODEL-CHECKSUMS.txt` 核对模型文件。
 - [ ] 便携 ZIP 完整解压后可从根目录 `ASRTools.exe` 启动，窗口标题显示 `ASRTools v{APP_VERSION}`。
 - [ ] 应用能添加音频和视频文件。
-- [ ] 应用能完成视频转音频，不依赖系统安装的 FFmpeg。
-- [ ] 仅用交付方提供的测试音频，应用能完成 B 接口识别并生成非空结果。
+- [ ] 应用默认显示“本地离线（SenseVoice）”，无需联网即可完成视频转音频和识别，不依赖系统安装的 FFmpeg。
+- [ ] 勾选五个本地媒体任务后，任务按顺序完成并生成非空结果；若其中一个输入失效，后续任务仍会继续处理。
+- [ ] 可手动选择 B 接口；本次离线交付验收不要求调用该在线接口。
 - [ ] SRT、TXT、ASS 输出均写入原媒体目录。
 - [ ] 记录 Windows 版本、360/Defender 版本、SmartScreen 表现、测试时间和异常。
 

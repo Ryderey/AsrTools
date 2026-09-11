@@ -1,0 +1,11 @@
+{
+  "sensevoice-small-int8/model.int8.onnx": "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
+  "sensevoice-small-int8/tokens.txt": "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
+  "silero-vad/silero_vad.onnx": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+  "fa-zh/model.pt": "f34ede558af831fb504206b25f1c2f27ca2f77753c26c4dd38d03323153b6f73",
+  "fa-zh/config.yaml": "bf673207f2a2e2263403d64adec49666166c047dc74bc03153b0e7882f8d09b4",
+  "fa-zh/configuration.json": "fbb37220a629e1eb5468c8486fcd5f5650bc0817b28551530e5485db41662c73",
+  "fa-zh/tokens.json": "2b20c2b12572d682afff84ce1c8d560f67b8b32a4c1f21567411d141ed352127",
+  "fa-zh/seg_dict": "59a2ef803a3f1648ad03a2e1480db1c1ee0c0d7dc4ef4dbd16cea33944329022",
+  "fa-zh/am.mvn": "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5"
+}
