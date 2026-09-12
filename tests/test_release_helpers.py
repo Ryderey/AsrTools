@@ -10,6 +10,7 @@ import sysconfig
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+import zipfile
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +227,155 @@ if ($report.task_status -cne $expected) {{
                 0,
                 completed.stderr.decode("utf-8", errors="replace"),
             )
+
+
+class PortableExclusionTests(unittest.TestCase):
+    def _stage(self, directory):
+        stage = Path(directory) / "ASRTools-portable"
+        for relative in (
+            "_runtime/torch/include/deep/header.h",
+            "_runtime/torch/lib/torch_cpu.dll",
+            "_runtime/jieba/lac_small/model.pdmodel",
+            "_runtime/jieba/analyse/dict.txt",
+            "_runtime/jieba/lac_small_extra/keep.txt",
+            "_runtime/torch/include2/keep.txt",
+            "_runtime/ASRTools-runtime.exe",
+        ):
+            path = stage / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(relative, encoding="utf-8")
+        return stage
+
+    def test_reviewed_exclusions_remove_only_their_subtrees(self):
+        with TemporaryDirectory() as directory:
+            stage = self._stage(directory)
+            release_payload.prune_portable(stage)
+            for removed in ("_runtime/torch/include", "_runtime/jieba/lac_small"):
+                self.assertFalse((stage / removed).exists(), removed)
+            for kept in ("_runtime/torch/lib/torch_cpu.dll",
+                         "_runtime/jieba/analyse/dict.txt",
+                         "_runtime/jieba/lac_small_extra/keep.txt",
+                         "_runtime/torch/include2/keep.txt",
+                         "_runtime/ASRTools-runtime.exe"):
+                self.assertTrue((stage / kept).is_file(), kept)
+            # Re-running must fail loudly rather than silently accept a changed tree.
+            with self.assertRaisesRegex(FileNotFoundError, "Reviewed exclusion is missing"):
+                release_payload.prune_portable(stage)
+
+    def test_missing_staging_directory_fails(self):
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(FileNotFoundError, "staging directory is missing"):
+                release_payload.prune_portable(Path(directory) / "absent")
+
+
+class ArchiveCompressionTests(unittest.TestCase):
+    def test_archive_uses_explicit_deflate_level(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "stage"
+            (source / "nested").mkdir(parents=True)
+            payload = "中文内容 " * 5000
+            (source / "nested" / "data.txt").write_text(payload, encoding="utf-8")
+            destination = Path(directory) / "out.zip"
+            release_payload.archive(source, destination)
+            with zipfile.ZipFile(destination) as archive:
+                info = archive.getinfo("nested/data.txt")
+                self.assertEqual(archive.read(info), payload.encode("utf-8"))
+            level_nine = destination.stat().st_size
+            release_payload.archive(source, destination, compresslevel=0)
+            self.assertGreater(destination.stat().st_size, level_nine)
+            with zipfile.ZipFile(destination) as archive:
+                self.assertEqual(archive.read("nested/data.txt"), payload.encode("utf-8"))
+
+
+class InferenceProfileIntegrationTests(unittest.TestCase):
+    def _profile(self, directory, **overrides):
+        profile = {
+            "module_closure": ["funasr", "funasr.utils.load_utils"],
+            "excluded_dependency_candidates": ["librosa", "numba", "llvmlite"],
+            "conditional_dependency_candidates": ["scipy"],
+        }
+        profile.update(overrides)
+        path = Path(directory) / "profile.json"
+        path.write_text(json.dumps(profile), encoding="utf-8")
+        return path
+
+    def _report(self, directory, modules, completion="yes"):
+        nodes = "".join(f'<module name="{name}" kind="code"/>' for name in modules)
+        path = Path(directory) / "report.xml"
+        path.write_text(
+            f'<nuitka-compilation-report completion="{completion}">{nodes}'
+            "</nuitka-compilation-report>",
+            encoding="utf-8",
+        )
+        return path
+
+    def test_generated_profile_argument_keeps_a_stable_identity(self):
+        self.assertEqual(
+            release_payload.normalize_nuitka_argument(
+                "--user-package-configuration-file=C:/tmp/build/report/funasr.yml"),
+            "--user-package-configuration-file=@inference-profile",
+        )
+        self.assertEqual(release_payload.normalize_nuitka_argument("--include-module=funasr"),
+                         "--include-module=funasr")
+
+    def test_profile_fingerprint_tracks_content_not_directory_path(self):
+        with TemporaryDirectory() as directory:
+            first, second = Path(directory) / "one", Path(directory) / "two"
+            for target in (first, second):
+                (target / "funasr" / "utils").mkdir(parents=True)
+                (target / "funasr" / "utils" / "load_utils.py").write_text(
+                    "def extract_fbank():\n    return 1\n", encoding="utf-8")
+                (target / "funasr-inference-modules.txt").write_text("funasr\n", encoding="utf-8")
+            self.assertEqual(release_payload.profile_fingerprint_inputs(first),
+                             release_payload.profile_fingerprint_inputs(second))
+            (second / "funasr" / "utils" / "load_utils.py").write_text(
+                "def extract_fbank():\n    return 2\n", encoding="utf-8")
+            self.assertNotEqual(release_payload.profile_fingerprint_inputs(first),
+                                release_payload.profile_fingerprint_inputs(second))
+
+    def test_inference_report_gate_accepts_the_reviewed_closure(self):
+        with TemporaryDirectory() as directory:
+            profile = self._profile(directory)
+            report = self._report(directory, ["funasr", "funasr.utils.load_utils", "torch"])
+            result = release_payload.check_inference_report(report, profile)
+            self.assertEqual(result["funasr_modules"], 2)
+            self.assertEqual(result["conditional_present"], [])
+
+    def test_inference_report_gate_rejects_closure_drift(self):
+        with TemporaryDirectory() as directory:
+            profile = self._profile(directory)
+            extra = self._report(directory, ["funasr", "funasr.utils.load_utils",
+                                             "funasr.models.campplus.model"])
+            with self.assertRaisesRegex(RuntimeError, "outside the reviewed closure"):
+                release_payload.check_inference_report(extra, profile)
+            missing = self._report(directory, ["funasr"])
+            with self.assertRaisesRegex(RuntimeError, "absent from the binary"):
+                release_payload.check_inference_report(missing, profile)
+            incomplete = self._report(directory, ["funasr", "funasr.utils.load_utils"],
+                                      completion="exception")
+            with self.assertRaisesRegex(RuntimeError, "did not complete successfully"):
+                release_payload.check_inference_report(incomplete, profile)
+
+    def test_inference_report_gate_rejects_remaining_primary_dependencies(self):
+        with TemporaryDirectory() as directory:
+            profile = self._profile(directory)
+            report = self._report(directory, ["funasr", "funasr.utils.load_utils",
+                                              "librosa.core.audio"])
+            with self.assertRaisesRegex(RuntimeError, "still compiled in: \\['librosa'\\]"):
+                release_payload.check_inference_report(report, profile)
+
+    @unittest.skipUnless(os.name == "nt" and WINDOWS_POWERSHELL, "requires Windows PowerShell")
+    def test_release_script_uses_the_generated_inference_profile(self):
+        script = (REPO_ROOT / "scripts" / "build_release.ps1").read_text(
+            encoding="utf-8-sig")
+        self.assertIn("prepare_funasr_profile.py", script)
+        self.assertIn("check-inference-report", script)
+        self.assertIn('"--user-package-configuration-file=$InferenceYaml"', script)
+        self.assertIn('"--include-module=$_"', script)
+        self.assertIn("--profile-dir", script)
+        # The full-package include survives only as the explicit rollback branch.
+        self.assertEqual(script.count('"--include-package=funasr"'), 1)
+        self.assertIn("$DisableInferenceProfile", script)
 
 
 if __name__ == "__main__":

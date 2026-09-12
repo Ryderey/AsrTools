@@ -11,6 +11,12 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_NOTICES = ("sensevoice-small-int8/LICENSE", "sensevoice-small-int8/README.md", "fa-zh/README.md")
+# Reviewed delivery-only exclusions, relative to the portable staging root. PyTorch
+# development headers are collected by Nuitka's standard configuration but no
+# shipped path compiles C++ extensions (JIT is disabled), and jieba's Paddle model
+# is only reached through its unexposed Paddle mode. Keep this list exact: it is
+# not a general "delete unused files" pass.
+PORTABLE_EXCLUSIONS = ("_runtime/torch/include", "_runtime/jieba/lac_small")
 FUNASR_REGISTRY_SOURCE = """\
             class_file = inspect.getfile(target_class)
             class_line = inspect.getsourcelines(target_class)[1]
@@ -53,14 +59,43 @@ def model_payload(source, destination=None):
     print(f'Local model payload: {len(manifest)} files verified' + (' and collected' if destination else ''))
 
 
-def archive(source, destination, include_root=False):
+def prune_portable(staging):
+    """Remove the reviewed delivery-only subtrees from a staged portable tree.
+
+    Applies only to a newly created staging directory. Missing subtrees are an
+    error: the packaged inventory changed, so the build must be reviewed instead
+    of silently shipping the extra bytes.
+    """
+    staging = Path(staging).resolve()
+    if not staging.is_dir():
+        raise FileNotFoundError(f'Portable staging directory is missing: {staging}')
+    removed = {}
+    for relative in PORTABLE_EXCLUSIONS:
+        target = staging / relative
+        if not target.is_dir():
+            raise FileNotFoundError(
+                f'Reviewed exclusion is missing from the staged tree: {relative}. '
+                'The packaged inventory changed; review the delivery before excluding.'
+            )
+        files = [path for path in target.rglob('*') if path.is_file()]
+        removed[relative] = (len(files), sum(path.stat().st_size for path in files))
+        shutil.rmtree(target)
+    total_files = sum(count for count, _ in removed.values())
+    total_bytes = sum(size for _, size in removed.values())
+    for relative, (count, size) in removed.items():
+        print(f'Excluded {relative}: {count} files, {size:,} bytes')
+    print(f'Portable exclusions: removed {total_files} files, {total_bytes:,} bytes')
+
+
+def archive(source, destination, include_root=False, compresslevel=9):
     source, destination = source.resolve(), destination.resolve()
     if destination.is_relative_to(source):
         raise ValueError('Archive destination must be outside its input directory')
     temporary = destination.with_suffix('.zip.partial')
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=True) as output:
+        with zipfile.ZipFile(temporary, 'w', compression=zipfile.ZIP_DEFLATED,
+                             compresslevel=compresslevel, allowZip64=True) as output:
             for path in sorted(source.rglob('*')):
                 relative = path.relative_to(source)
                 if '__pycache__' in relative.parts or path.suffix in ('.pyc', '.pyo', '.log', '.tmp') or path.name == 'asr_cache.json':
@@ -71,7 +106,8 @@ def archive(source, destination, include_root=False):
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
-    print(f'Archive ready: {destination} ({destination.stat().st_size:,} bytes)')
+    print(f'Archive ready: {destination} ({destination.stat().st_size:,} bytes, '
+          f'deflate level {compresslevel})')
 
 
 def local_lock(source, destination):
@@ -106,7 +142,94 @@ def patch_funasr_registry(register_path=None):
     print(f'Patched FunASR registry for Nuitka standalone: {register_path}')
 
 
-def compile_fingerprint(args_file, output):
+def normalize_nuitka_argument(argument):
+    """Give generated-profile arguments a stable identity for fingerprinting.
+
+    The generated configuration and module list live under a timestamped build
+    directory, so hashing their absolute paths would rebuild on every run and
+    would still miss a changed file at a fixed path. Their content is hashed
+    separately; the argument keeps only a logical identity.
+    """
+    for prefix in ('--user-package-configuration-file=',):
+        if str(argument).startswith(prefix):
+            return prefix + '@inference-profile'
+    return str(argument)
+
+
+def profile_fingerprint_inputs(profile_dir):
+    """Content hashes for the authored profile, generator and generated outputs."""
+    import hashlib as _hashlib
+
+    directory = Path(profile_dir)
+    if not directory.is_dir():
+        raise RuntimeError(f'Generated inference profile directory is missing: {directory}')
+
+    def sha256(path):
+        digest = _hashlib.sha256()
+        with Path(path).open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    entries = {}
+    for relative in ('release-assets/funasr-inference-profile.json',
+                     'scripts/prepare_funasr_profile.py'):
+        path = ROOT / relative
+        if not path.is_file():
+            raise RuntimeError(f'Missing inference profile input: {path}')
+        entries[relative] = sha256(path)
+    for path in sorted(directory.rglob('*')):
+        if '__pycache__' in path.parts or path.suffix in ('.pyc', '.pyo'):
+            continue
+        if path.is_file():
+            entries[f'generated/{path.relative_to(directory).as_posix()}'] = sha256(path)
+    entries['profile_content_hash'] = _hashlib.sha256(
+        json.dumps(entries, sort_keys=True).encode('utf-8')).hexdigest()
+    return entries
+
+
+def check_inference_report(report_path, profile_path):
+    """Gate the compiled module inventory against the reviewed inference profile."""
+    import xml.etree.ElementTree as ElementTree
+
+    profile = json.loads(Path(profile_path).read_text(encoding='utf-8'))
+    report_path = Path(report_path)
+    if not report_path.is_file():
+        raise RuntimeError(f'Compilation report is missing: {report_path}')
+    root = ElementTree.parse(report_path).getroot()
+    if root.tag != 'nuitka-compilation-report':
+        raise RuntimeError(f'Unexpected compilation report root: {root.tag}')
+    if root.get('completion') != 'yes':
+        raise RuntimeError(
+            f"Compilation report did not complete successfully: {root.get('completion')!r}")
+    included = {node.get('name') for node in root.findall('module') if node.get('name')}
+    accepted = set(profile['module_closure'])
+    funasr_modules = {name for name in included
+                      if name == 'funasr' or name.startswith('funasr.')}
+    unexpected = sorted(funasr_modules - accepted)
+    if unexpected:
+        raise RuntimeError(
+            f'Compiled FunASR modules outside the reviewed closure: {unexpected}. '
+            'Inspect their importer before editing the profile.')
+    missing = sorted(accepted - funasr_modules)
+    if missing:
+        raise RuntimeError(f'Reviewed FunASR modules are absent from the binary: {missing}')
+    top_level = {name.split('.')[0] for name in included}
+    forbidden = sorted(set(profile['excluded_dependency_candidates']) & top_level)
+    if forbidden:
+        raise RuntimeError(
+            f'Excluded dependency candidates are still compiled in: {forbidden}. '
+            'Resolve the remaining importer instead of weakening the gate.')
+    conditional = sorted(set(profile.get('conditional_dependency_candidates', [])) & top_level)
+    print(f'Inference profile report: {len(funasr_modules)} funasr modules compiled, '
+          f'0 unexpected, primary exclusions absent')
+    if conditional:
+        print(f'  conditional dependencies still present (allowed, measured): {conditional}')
+    return {'funasr_modules': len(funasr_modules), 'unexpected': unexpected,
+            'conditional_present': conditional}
+
+
+def compile_fingerprint(args_file, output, profile_dir=None):
     """Fingerprint every input Nuitka standalone compiles, for change-gated rebuilds.
 
     Hashing repo sources, Nuitka arguments, Python/Nuitka versions, installed
@@ -120,7 +243,7 @@ def compile_fingerprint(args_file, output):
     parameters = json.loads(Path(args_file).read_text(encoding='utf-8'))
     # Per-run values do not change the produced binary and would break comparisons.
     stable_args = [
-        argument for argument in parameters.get('args', [])
+        normalize_nuitka_argument(argument) for argument in parameters.get('args', [])
         if not str(argument).startswith(('--output-dir=', '--report=', '--jobs='))
     ]
 
@@ -174,6 +297,8 @@ def compile_fingerprint(args_file, output):
         'repo_files': repo_files,
         'site_packages_py': site_py,
     }
+    if profile_dir:
+        components['inference_profile'] = profile_fingerprint_inputs(profile_dir)
     fingerprint = hashlib.sha256(
         json.dumps(components, sort_keys=True).encode('utf-8')).hexdigest()
     Path(output).write_text(
@@ -236,23 +361,34 @@ def main():
     zip_parser.add_argument('--source', type=Path, required=True)
     zip_parser.add_argument('--destination', type=Path, required=True)
     zip_parser.add_argument('--include-root', action='store_true')
+    zip_parser.add_argument('--compresslevel', type=int, choices=range(0, 10), default=9)
+    prune_parser = sub.add_parser('prune')
+    prune_parser.add_argument('--source', type=Path, required=True)
     lock_parser = sub.add_parser('local-lock')
     lock_parser.add_argument('--source', type=Path, required=True)
     lock_parser.add_argument('--destination', type=Path, required=True)
     fingerprint_parser = sub.add_parser('compile-fingerprint')
     fingerprint_parser.add_argument('--args-file', type=Path, required=True)
     fingerprint_parser.add_argument('--out', type=Path, required=True)
+    fingerprint_parser.add_argument('--profile-dir', type=Path)
+    report_parser = sub.add_parser('check-inference-report')
+    report_parser.add_argument('--report', type=Path, required=True)
+    report_parser.add_argument('--profile', type=Path, required=True)
     sub.add_parser('environment')
     sub.add_parser('build-tools')
     args = parser.parse_args()
     if args.command == 'models':
         model_payload(args.source, args.destination)
     elif args.command == 'zip':
-        archive(args.source, args.destination, args.include_root)
+        archive(args.source, args.destination, args.include_root, args.compresslevel)
+    elif args.command == 'prune':
+        prune_portable(args.source)
     elif args.command == 'local-lock':
         local_lock(args.source, args.destination)
     elif args.command == 'compile-fingerprint':
-        compile_fingerprint(args.args_file, args.out)
+        compile_fingerprint(args.args_file, args.out, args.profile_dir)
+    elif args.command == 'check-inference-report':
+        check_inference_report(args.report, args.profile)
     elif args.command == 'build-tools':
         check_build_tools()
     else:

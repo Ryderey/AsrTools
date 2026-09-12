@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "profile": "funasr-inference-1.2.6",
+  "description": "Reduced FunASR inference closure for the ASRTools CPU fa-zh aligner. Generated modules keep the upstream numeric functions and checkpoint loader; only package discovery and unused optional imports are removed.",
+  "runtime": {
+    "python": "3.12.13",
+    "funasr": "1.2.6",
+    "torch": "2.6.0+cpu",
+    "torchaudio": "2.6.0+cpu",
+    "nuitka": "4.1.3"
+  },
+  "source_hashes": {
+    "funasr": "5100f1a66ff410f096ba0f42bc446f41a79c2de241c061aa4d00e8f3b427b97e",
+    "funasr.auto.auto_model": "f04e9b984e0d12f109212e7a711e03eb276f20673e418165f88c9ac40417b520",
+    "funasr.utils.load_utils": "73b55f1104ea5ee2304f0493a9b442a3b1ff90968183737b7cb24418cb673e23",
+    "funasr.frontends.wav_frontend": "4771916cbbdc02ad095493ada7f2d9502a3f3c58befab0867d7e43769363d26f"
+  },
+  "retained_definitions": {
+    "funasr.auto.auto_model": ["AutoModel.build_model"],
+    "funasr.utils.load_utils": ["extract_fbank"],
+    "funasr.frontends.wav_frontend": ["load_cmvn", "apply_cmvn", "apply_lfr", "WavFrontend"]
+  },
+  "registry": [
+    {"table": "model_classes", "key": "MonotonicAligner", "module": "funasr.models.monotonic_aligner.model", "symbol": "MonotonicAligner"},
+    {"table": "encoder_classes", "key": "SANMEncoder", "module": "funasr.models.sanm.encoder", "symbol": "SANMEncoder"},
+    {"table": "predictor_classes", "key": "CifPredictorV3", "module": "funasr.models.bicif_paraformer.cif_predictor", "symbol": "CifPredictorV3"},
+    {"table": "frontend_classes", "key": "WavFrontend", "module": "funasr.frontends.wav_frontend", "symbol": "WavFrontend"},
+    {"table": "tokenizer_classes", "key": "CharTokenizer", "module": "funasr.tokenizer.char_tokenizer", "symbol": "CharTokenizer"},
+    {"table": "specaug_classes", "key": "SpecAugLFR", "module": "funasr.models.specaug.specaug", "symbol": "SpecAugLFR"}
+  ],
+  "selected_configuration": {
+    "model": "MonotonicAligner",
+    "encoder": "SANMEncoder",
+    "predictor": "CifPredictorV3",
+    "frontend": "WavFrontend",
+    "tokenizer": "CharTokenizer",
+    "specaug": "SpecAugLFR"
+  },
+  "module_closure": [
+    "funasr",
+    "funasr.auto",
+    "funasr.auto.auto_model",
+    "funasr.frontends",
+    "funasr.frontends.wav_frontend",
+    "funasr.models",
+    "funasr.models.bicif_paraformer",
+    "funasr.models.bicif_paraformer.cif_predictor",
+    "funasr.models.ctc",
+    "funasr.models.ctc.ctc",
+    "funasr.models.lora",
+    "funasr.models.lora.layers",
+    "funasr.models.monotonic_aligner",
+    "funasr.models.monotonic_aligner.model",
+    "funasr.models.paraformer",
+    "funasr.models.paraformer.cif_predictor",
+    "funasr.models.sanm",
+    "funasr.models.sanm.attention",
+    "funasr.models.sanm.encoder",
+    "funasr.models.scama",
+    "funasr.models.scama.utils",
+    "funasr.models.specaug",
+    "funasr.models.specaug.mask_along_axis",
+    "funasr.models.specaug.specaug",
+    "funasr.models.specaug.time_warp",
+    "funasr.models.transformer",
+    "funasr.models.transformer.attention",
+    "funasr.models.transformer.embedding",
+    "funasr.models.transformer.encoder",
+    "funasr.models.transformer.layer_norm",
+    "funasr.models.transformer.positionwise_feed_forward",
+    "funasr.models.transformer.utils",
+    "funasr.models.transformer.utils.add_sos_eos",
+    "funasr.models.transformer.utils.multi_layer_conv",
+    "funasr.models.transformer.utils.nets_utils",
+    "funasr.models.transformer.utils.repeat",
+    "funasr.models.transformer.utils.subsampling",
+    "funasr.register",
+    "funasr.tokenizer",
+    "funasr.tokenizer.abs_tokenizer",
+    "funasr.tokenizer.char_tokenizer",
+    "funasr.train_utils",
+    "funasr.train_utils.device_funcs",
+    "funasr.train_utils.load_pretrained_model",
+    "funasr.train_utils.set_all_random_seed",
+    "funasr.utils",
+    "funasr.utils.datadir_writer",
+    "funasr.utils.load_utils",
+    "funasr.utils.misc",
+    "funasr.utils.postprocess_utils",
+    "funasr.utils.timestamp_tools",
+    "funasr.utils.torch_function"
+  ],
+  "closure_roots": [
+    "funasr",
+    "funasr.utils.load_utils",
+    "funasr.utils.timestamp_tools"
+  ],
+  "excluded_dependency_candidates": [
+    "librosa",
+    "numba",
+    "llvmlite"
+  ],
+  "conditional_dependency_candidates": [
+    "sklearn",
+    "scipy"
+  ],
+  "retained_external_dependencies": [
+    "torch",
+    "torchaudio",
+    "numpy",
+    "omegaconf",
+    "yaml",
+    "torch_complex"
+  ]
+}

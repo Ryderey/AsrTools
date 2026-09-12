@@ -10,6 +10,11 @@ param(
 
     [string]$ResultPath,
 
+    # Rollback switch for the FunASR inference profile. The pruned profile is the
+    # default; the full-package inclusion below is retained only so a failed
+    # candidate can be reverted to the last validated packaging.
+    [switch]$DisableInferenceProfile,
+
     [ValidateRange(1, 64)]
     [int]$Jobs = [Math]::Min(4, [Math]::Max(1, [Environment]::ProcessorCount - 1))
 )
@@ -40,6 +45,12 @@ $EntryPoint = Join-Path $RepoRoot "asr_gui.py"
 $IconPath = Join-Path $RepoRoot "resources\app_icon.ico"
 $ReleaseAssets = Join-Path $RepoRoot "release-assets"
 $LauncherSource = Join-Path $ReleaseAssets "portable_launcher.cs"
+$ProfileScript = Join-Path $PSScriptRoot "prepare_funasr_profile.py"
+$ProfileSource = Join-Path $ReleaseAssets "funasr-inference-profile.json"
+$InferenceProfileEnabled = -not $DisableInferenceProfile
+$InferenceProfileDir = $null
+$InferenceModulesFile = $null
+$InferenceYaml = $null
 
 function Invoke-Checked {
     param(
@@ -228,15 +239,55 @@ else {
 }
 Invoke-Checked -FilePath $VenvPython -Arguments @($PayloadScript, "environment")
 
+# Generate the reduced FunASR inference closure before compilation. The build
+# includes only the reviewed module list and replaces the four projected modules
+# through the generated Nuitka package configuration.
+if ($InferenceProfileEnabled) {
+    if (-not (Test-Path -LiteralPath $ProfileScript -PathType Leaf)) {
+        throw "Required inference profile generator is missing: $ProfileScript"
+    }
+    if (-not (Test-Path -LiteralPath $ProfileSource -PathType Leaf)) {
+        throw "Required inference profile is missing: $ProfileSource"
+    }
+    $InferenceProfileDir = Join-Path $BuildRoot "funasr-inference-profile"
+    if ($ResumingBuild) {
+        # Resume trusts the recorded compile fingerprint, so it must reuse the
+        # exact generated profile the compiled runtime was built from.
+        if (-not (Test-Path -LiteralPath (Join-Path $InferenceProfileDir "funasr-inference-modules.txt") -PathType Leaf)) {
+            throw "Resumed build is missing its generated inference profile: $InferenceProfileDir"
+        }
+        Write-Host "Reusing generated inference profile: $InferenceProfileDir"
+    }
+    else {
+        Invoke-Checked -FilePath $VenvPython -Arguments @(
+            $ProfileScript, "--profile", $ProfileSource, "--output-dir", $InferenceProfileDir
+        )
+    }
+    $InferenceModulesFile = Join-Path $InferenceProfileDir "funasr-inference-modules.txt"
+    $InferenceYaml = Join-Path $InferenceProfileDir "funasr-inference.nuitka-package.config.yml"
+    $InferenceModules = @(
+        [IO.File]::ReadAllText($InferenceModulesFile, [Text.Encoding]::UTF8) -split "\r?\n" |
+            ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    )
+    if ($InferenceModules.Count -lt 2 -or $InferenceModules -notcontains "funasr") {
+        throw "Generated inference module list is unusable: $InferenceModulesFile"
+    }
+    $InferenceArguments = @($InferenceModules | ForEach-Object { "--include-module=$_" }) +
+        @("--user-package-configuration-file=$InferenceYaml", "--show-anti-bloat-changes")
+}
+else {
+    Write-Host "Inference profile disabled; including the full funasr package."
+    $InferenceArguments = @("--include-package=funasr", "--include-package-data=funasr")
+}
+
 $CommonNuitkaArguments = @(
     "-m", "nuitka",
     "--enable-plugin=pyqt5",
     "--include-package=qfluentwidgets",
-    "--include-package=bk_asr",
-    "--include-package=funasr",
+    "--include-package=bk_asr"
+) + $InferenceArguments + @(
     "--include-package=sherpa_onnx",
     "--include-package=sentencepiece",
-    "--include-package-data=funasr",
     "--include-package-data=jieba",
     "--include-distribution-metadata=funasr",
     "--include-distribution-metadata=torch",
@@ -280,7 +331,12 @@ else {
         (@{ appVersion = $AppVersion; args = $CommonNuitkaArguments } | ConvertTo-Json -Compress),
         [Text.UTF8Encoding]::new($false)
     )
-    $FingerprintResult = & $VenvPython $PayloadScript compile-fingerprint --args-file $CompileArgsFile --out $CurrentFingerprintFile
+    $FingerprintArguments = @($PayloadScript, "compile-fingerprint",
+        "--args-file", $CompileArgsFile, "--out", $CurrentFingerprintFile)
+    if ($InferenceProfileEnabled) {
+        $FingerprintArguments += @("--profile-dir", $InferenceProfileDir)
+    }
+    $FingerprintResult = & $VenvPython @FingerprintArguments
     if ($LASTEXITCODE -ne 0 -or -not $FingerprintResult) {
         throw "Unable to compute the compile-inputs fingerprint."
     }
@@ -363,6 +419,17 @@ $CompilationReport = [xml](Get-Content -LiteralPath (Join-Path $CompileRoot 'por
 if ($CompilationReport.DocumentElement.GetAttribute('completion') -ne 'yes') {
     throw "Compilation report does not indicate successful completion; refusing to package."
 }
+# Gate the compiled module inventory against the reviewed profile: every selected
+# funasr module present, nothing outside the closure, and the primary exclusion
+# candidates absent. Compiled modules live inside the executable, so this report
+# is the only inclusion evidence.
+if ($InferenceProfileEnabled) {
+    Invoke-Checked -FilePath $VenvPython -Arguments @(
+        $PayloadScript, "check-inference-report",
+        "--report", (Join-Path $CompileRoot 'portable-compilation-report.xml'),
+        "--profile", $ProfileSource
+    )
+}
 # Persist the fingerprint that produced this .dist so later builds can skip
 # recompilation while inputs are unchanged. Skip/reuse runs leave the sidecar
 # in the compile root they reused.
@@ -376,25 +443,43 @@ if (-not $ResumingBuild -and -not $SkipCompilation) {
 # the class statement, so module-level helpers defined after the class (e.g.
 # char_tokenizer.load_seg_dict) never exist at runtime. Ship the package tree
 # so inspect/linecache resolve sources; imports still come from the executable.
-Write-Host "Bundling funasr module sources for runtime inspect support..."
-$FunasrRootOutput = & $VenvPython -c "import funasr, os; print(os.path.dirname(funasr.__file__))"
-if ($LASTEXITCODE -ne 0 -or -not $FunasrRootOutput) {
-    throw "Unable to locate the bundled funasr package in the build environment."
-}
-$FunasrRoot = [IO.Path]::GetFullPath(([string]$FunasrRootOutput).Trim())
-if (-not (Test-Path -LiteralPath $FunasrRoot -PathType Container)) {
-    throw "funasr package directory is missing: $FunasrRoot"
-}
-$FunasrTarget = Join-Path $PortableDist[0].FullName "funasr"
-New-Item -ItemType Directory -Path $FunasrTarget -Force | Out-Null
-Get-ChildItem -LiteralPath $FunasrRoot -Recurse -File |
-    Where-Object { $_.FullName -notmatch "__pycache__" } |
-    ForEach-Object {
-        $Relative = $_.FullName.Substring($FunasrRoot.Length).TrimStart('\')
-        $Destination = Join-Path $FunasrTarget $Relative
-        New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
-        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Force
+# With the inference profile the shipped tree is the generated closure, so a
+# stale full source copy cannot reintroduce a removed module.
+if ($InferenceProfileEnabled) {
+    Write-Host "Bundling generated funasr inference sources for runtime inspect support..."
+    $GeneratedFunasr = Join-Path $InferenceProfileDir "funasr"
+    if (-not (Test-Path -LiteralPath $GeneratedFunasr -PathType Container)) {
+        throw "Generated funasr source tree is missing: $GeneratedFunasr"
     }
+    $FunasrTarget = Join-Path $PortableDist[0].FullName "funasr"
+    if (Test-Path -LiteralPath $FunasrTarget) {
+        # A resumed or reused .dist already carries sources from the same profile.
+        # Replace them so a tree left by a previous profile cannot persist.
+        Remove-Item -LiteralPath $FunasrTarget -Recurse -Force
+    }
+    Copy-Item -LiteralPath $GeneratedFunasr -Destination $FunasrTarget -Recurse
+}
+else {
+    Write-Host "Bundling funasr module sources for runtime inspect support..."
+    $FunasrRootOutput = & $VenvPython -c "import funasr, os; print(os.path.dirname(funasr.__file__))"
+    if ($LASTEXITCODE -ne 0 -or -not $FunasrRootOutput) {
+        throw "Unable to locate the bundled funasr package in the build environment."
+    }
+    $FunasrRoot = [IO.Path]::GetFullPath(([string]$FunasrRootOutput).Trim())
+    if (-not (Test-Path -LiteralPath $FunasrRoot -PathType Container)) {
+        throw "funasr package directory is missing: $FunasrRoot"
+    }
+    $FunasrTarget = Join-Path $PortableDist[0].FullName "funasr"
+    New-Item -ItemType Directory -Path $FunasrTarget -Force | Out-Null
+    Get-ChildItem -LiteralPath $FunasrRoot -Recurse -File |
+        Where-Object { $_.FullName -notmatch "__pycache__" } |
+        ForEach-Object {
+            $Relative = $_.FullName.Substring($FunasrRoot.Length).TrimStart('\')
+            $Destination = Join-Path $FunasrTarget $Relative
+            New-Item -ItemType Directory -Path (Split-Path -Parent $Destination) -Force | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination $Destination -Force
+        }
+}
 
 # The frozen runtime's importlib.metadata lookups (the offline identity check
 # reads funasr/torch/sherpa-onnx versions) only resolve distributions whose
@@ -421,6 +506,10 @@ if (Test-Path -LiteralPath $PortableStage) {
 }
 New-Item -ItemType Directory -Path $PortableStage, $PortableRuntime, $PortableDocs -Force | Out-Null
 Copy-Item -Path (Join-Path $PortableDist[0].FullName "*") -Destination $PortableRuntime -Recurse
+# Delivery-only exclusions: PyTorch development headers and jieba's unused Paddle
+# model data are collected by the current build settings but no shipped code path
+# reads them. Remove them from this staging copy only, with an exact reviewed list.
+Invoke-Checked -FilePath $VenvPython -Arguments @($PayloadScript, "prune", "--source", $PortableStage)
 Copy-Item -LiteralPath $FFmpegPath -Destination (Join-Path $PortableRuntime "ffmpeg.exe")
 New-PortableLauncher `
     -Source $LauncherSource `
@@ -516,6 +605,20 @@ elseif ($SkipCompilation) {
 else {
     $CompileSourceLabel = "rebuilt for this delivery"
 }
+if ($InferenceProfileEnabled) {
+    $InferenceReport = Get-Content -LiteralPath (Join-Path $InferenceProfileDir "generation-report.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+    $InferenceManifestLines = @"
+FunASR packaging: inference profile $($InferenceReport.profile)
+FunASR profile SHA-256: $($InferenceReport.profile_sha256)
+FunASR compiled module closure: $(@($InferenceReport.module_list).Count) reviewed modules; unexpected modules: 0
+FunASR source guards: $(@($InferenceReport.preserved_definition_sha256.PSObject.Properties).Count) preserved definitions verified against upstream ASTs
+FunASR dependency gate: librosa, numba and llvmlite must be absent from the compilation report
+FunASR runtime equivalence: packaged-runtime acceptance remains user-owned; no application was launched
+"@
+}
+else {
+    $InferenceManifestLines = "FunASR packaging: full funasr package included (inference profile disabled)"
+}
 $BuildManifest = @"
 ASRTools release build manifest
 App version: $AppVersion
@@ -535,6 +638,9 @@ FFmpeg input: $FFmpegPath
 FFmpeg version: $FFmpegVersionLine
 FFmpeg SHA-256: $ActualFFmpegHash
 Models: bundled in _runtime/models; docs/MODEL-CHECKSUMS.txt records inputs
+Delivery exclusions: _runtime/torch/include, _runtime/jieba/lac_small (reviewed; no shipped consumer)
+ZIP compression: DEFLATE level 9 (release_payload.py archive)
+$InferenceManifestLines
 funasr sources: bundled in _runtime/funasr; required for inspect/linecache in the frozen funasr 1.2.6 environment
 distribution metadata: bundled as *.dist-info under _runtime for importlib.metadata lookups (funasr/torch/sherpa-onnx)
 Application execution tests: not run; unpacked application verification is user-owned
